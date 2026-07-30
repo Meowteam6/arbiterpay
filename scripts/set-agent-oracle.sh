@@ -1,15 +1,18 @@
 #!/usr/bin/env bash
 #
-# Hand HealthPools' oracle role to SPOTTER's Circle wallet.
+# Hand the on-chain verification roles to SPOTTER's Circle wallet.
 #
-# One owner call, zero Solidity changes: after this, the Circle wallet is the
-# only address that can recordResult(), and settle() stays permissionless, so
-# the same wallet can settle. This is what makes SPOTTER the on-chain actor.
+# Two owner calls, zero Solidity changes:
+#   1. HealthPools.setOracle     - SPOTTER becomes the only recordResult caller
+#   2. HealthVerdict.setAttester - SPOTTER becomes the only recordVerdict caller
+# settle() stays permissionless, so the same wallet settles. Both roles flip
+# together; flipping only one leaves the record step half-broken. The agent
+# run loop (app/lib/server/agent/run.ts) reads both roles from the chain and
+# dispatches to whichever key currently holds them, so this cutover needs no
+# app deploy in either direction.
 #
-# DO NOT run this before the agent run loop exists. The app's oracle-signer
-# path (ORACLE_SIGNER_PRIVATE_KEY -> recordResult) stops working the moment
-# the oracle changes, and demo-reset.sh deploys fresh contracts with the old
-# oracle, so re-run this after every reset.
+# demo-reset.sh deploys fresh contracts with the legacy oracle, so re-run
+# this after every reset.
 #
 # Usage (from repo root):
 #   ./scripts/set-agent-oracle.sh 0xSPOTTER_ADDRESS
@@ -28,6 +31,7 @@ set -a; source .env; set +a
 
 RPC="${ARC_RPC_URL:-https://rpc.testnet.arc.network}"
 POOLS="${HEALTH_POOLS_ADDRESS:?HEALTH_POOLS_ADDRESS missing from .env}"
+VERDICT="${HEALTH_VERDICT_ADDRESS:-}"
 KEY="${DEPLOYER_PRIVATE_KEY:?DEPLOYER_PRIVATE_KEY missing from .env}"
 NEW_ORACLE="${1:-${SPOTTER_WALLET_ADDRESS:-}}"
 
@@ -60,4 +64,24 @@ if [ "$(echo "$AFTER" | tr '[:upper:]' '[:lower:]')" != "$(echo "$NEW_ORACLE" | 
   exit 1
 fi
 
-echo "==> SPOTTER can now recordResult() and settle(). The old oracle signer cannot."
+if [ -n "$VERDICT" ]; then
+  ATT_NOW="$(cast call "$VERDICT" "attester()(address)" --rpc-url "$RPC")"
+  echo "==> HealthVerdict $VERDICT"
+  echo "    attester now:   $ATT_NOW"
+  if [ "$(echo "$ATT_NOW" | tr '[:upper:]' '[:lower:]')" = "$(echo "$NEW_ORACLE" | tr '[:upper:]' '[:lower:]')" ]; then
+    echo "==> attester already set to SPOTTER; nothing to do"
+  else
+    cast send "$VERDICT" "setAttester(address)" "$NEW_ORACLE" \
+      --private-key "$KEY" --rpc-url "$RPC" >/dev/null
+    ATT_AFTER="$(cast call "$VERDICT" "attester()(address)" --rpc-url "$RPC")"
+    echo "==> attester is now: $ATT_AFTER"
+    if [ "$(echo "$ATT_AFTER" | tr '[:upper:]' '[:lower:]')" != "$(echo "$NEW_ORACLE" | tr '[:upper:]' '[:lower:]')" ]; then
+      echo "error: attester readback does not match; the record step is half-flipped" >&2
+      exit 1
+    fi
+  fi
+else
+  echo "==> HEALTH_VERDICT_ADDRESS unset: skipping setAttester (oracle-only deployment)"
+fi
+
+echo "==> SPOTTER now holds recordResult and recordVerdict. The old oracle signer holds neither."

@@ -21,6 +21,8 @@ export type CircleClient = Pick<
   | "getWallet"
   | "getWalletTokenBalance"
   | "requestTestnetTokens"
+  | "createContractExecutionTransaction"
+  | "getTransaction"
 >;
 
 export interface SpotterProvisionRecord {
