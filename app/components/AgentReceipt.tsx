@@ -5,15 +5,196 @@
 // steps print before their prices, the escalation prints unplanned at its
 // chronological position, and the running total stands against the frozen
 // cap. Nothing renders here that did not go through the ledger first.
+//
+// Two display rules on top of the projection: repeated errors of the same
+// stage and message collapse into one row with a count (the ledger is
+// append-only, so retries accumulate rows), and error rows lead with a calm
+// plain-language label - the raw message stays available behind a disclosure,
+// never as a wall of red.
 
-import { projectReceipt, type LedgerEntry } from "@/lib/agent-receipt";
+import {
+  projectReceipt,
+  type LedgerEntry,
+  type ReceiptRow,
+} from "@/lib/agent-receipt";
 import { ArcTxLink, Money, Verdict } from "@/components/ui";
 
-function SpendRow({
-  row,
-}: {
-  row: Extract<ReturnType<typeof projectReceipt>["rows"][number], { kind: "spend" }>;
-}) {
+type SpendReceiptRow = Extract<ReceiptRow, { kind: "spend" }>;
+
+// settle.periodEndIso is an optional field newer ledgers carry on deferred
+// entries; widened locally so this file compiles whether or not the ledger
+// type has it yet.
+type SettleLedgerEntry = Extract<LedgerEntry, { kind: "settle" }> & {
+  periodEndIso?: string;
+};
+
+const GATEWAY_NOTE = /gateway tx (\S+)/;
+
+// The non-component helpers below are exported for the unit tests in
+// AgentReceipt.test.ts; nothing else imports them.
+
+export function gatewayRefOf(note: string | null): string | null {
+  if (note === null) return null;
+  return GATEWAY_NOTE.exec(note)?.[1] ?? null;
+}
+
+export function noteWithoutGatewayRef(note: string | null): string | null {
+  if (note === null) return null;
+  const rest = note.replace(GATEWAY_NOTE, "").replace(/\s{2,}/g, " ").trim();
+  return rest === "" ? null : rest;
+}
+
+function shortRef(ref: string): string {
+  return ref.length > 16 ? `${ref.slice(0, 10)}…${ref.slice(-4)}` : ref;
+}
+
+/** Local, human moment for a settle time; null when unparseable. Same-day
+ *  moments render as a time, anything else as date plus time. */
+export function formatSettleMoment(date: Date): string | null {
+  if (Number.isNaN(date.getTime())) return null;
+  const sameDay = date.toDateString() === new Date().toDateString();
+  return sameDay
+    ? date.toLocaleTimeString([], { hour: "numeric", minute: "2-digit" })
+    : date.toLocaleString([], {
+        month: "short",
+        day: "numeric",
+        hour: "numeric",
+        minute: "2-digit",
+      });
+}
+
+const EPOCH_NOTE = /pool period ends at (\d+)/;
+
+/** The line a deferred settle moment renders as; null when the date is
+ *  invalid. Future moments read as a promise; past moments must not - the
+ *  pool period already ended, so the honest copy is that SPOTTER settles on
+ *  its next pass. */
+export function settleMomentLine(date: Date): string | null {
+  const when = formatSettleMoment(date);
+  if (when === null) return null;
+  return date.getTime() > Date.now()
+    ? `SPOTTER settles this automatically at ${when}`
+    : `the pool period ended at ${when}; SPOTTER settles this on its next pass`;
+}
+
+/** What a deferred settle row says. Prefers the entry's periodEndIso, then a
+ *  recognizable epoch inside the prose note - converted, never shown raw -
+ *  then the note itself. */
+export function deferredSettleCopy(
+  periodEndIso: string | undefined,
+  note: string | null,
+): string {
+  // typeof guard, not an undefined check: the field is untyped in old
+  // ledgers, and a runtime null would otherwise become new Date(null),
+  // which is VALID and renders Jan 1 1970 as the settle time.
+  if (typeof periodEndIso === "string") {
+    const line = settleMomentLine(new Date(periodEndIso));
+    if (line !== null) return line;
+  }
+  const epoch = note !== null ? EPOCH_NOTE.exec(note) : null;
+  if (epoch !== null) {
+    const seconds = Number(epoch[1]);
+    const line =
+      seconds > 1e9 && seconds < 1e11
+        ? settleMomentLine(new Date(seconds * 1000))
+        : null;
+    return (
+      line ??
+      "SPOTTER settles this automatically the moment the pool period ends"
+    );
+  }
+  return note ?? "settlement pending";
+}
+
+/** Calm per-stage label for an error row. Transient conditions (the chain not
+ *  ready yet, the verification service briefly down) read as waiting, not as
+ *  failure; only genuine failures keep the danger tone. */
+export function errorPresentation(
+  stage: string,
+  message: string,
+): { label: string; transient: boolean } {
+  switch (stage) {
+    case "attester":
+      return { label: "verification service unreachable", transient: true };
+    case "buy":
+      // The AFTER-settlement case is not a clean stop: money already moved
+      // for a purchase that then broke the cap. Say so in the headline.
+      if (message.includes("AFTER settlement")) {
+        return {
+          label: "a purchase cost more than estimated after it was paid",
+          transient: false,
+        };
+      }
+      return message.includes("cap")
+        ? { label: "stopped at the spend cap for this claim", transient: false }
+        : {
+            label: "could not buy the verification this claim needs",
+            transient: false,
+          };
+    case "record":
+      return {
+        label: "could not record the verdict on-chain",
+        transient: false,
+      };
+    case "settle":
+      if (message.includes("canSettle")) {
+        return { label: "settlement is waiting on the chain", transient: true };
+      }
+      if (message.includes("pool settled before this claim completed")) {
+        return {
+          label: "the pool settled before this claim finished",
+          transient: false,
+        };
+      }
+      return { label: "settlement did not complete", transient: false };
+    default:
+      return { label: "this step did not complete", transient: false };
+  }
+}
+
+type DisplayItem =
+  | { kind: "row"; key: number; row: Exclude<ReceiptRow, { kind: "error" }> }
+  | {
+      kind: "errors";
+      key: number;
+      stage: string;
+      message: string;
+      count: number;
+    };
+
+/** Collapse consecutive error rows with the same stage and message into one
+ *  item with a count; every other row passes through untouched. */
+export function collapseErrors(rows: ReceiptRow[]): DisplayItem[] {
+  const items: DisplayItem[] = [];
+  rows.forEach((row, index) => {
+    if (row.kind === "error") {
+      const last = items[items.length - 1];
+      if (
+        last !== undefined &&
+        last.kind === "errors" &&
+        last.stage === row.stage &&
+        last.message === row.message
+      ) {
+        last.count += 1;
+        return;
+      }
+      items.push({
+        kind: "errors",
+        key: index,
+        stage: row.stage,
+        message: row.message,
+        count: 1,
+      });
+      return;
+    }
+    items.push({ kind: "row", key: index, row });
+  });
+  return items;
+}
+
+function SpendRow({ row }: { row: SpendReceiptRow }) {
+  const gatewayRef = gatewayRefOf(row.note);
+  const note = noteWithoutGatewayRef(row.note);
   return (
     <li className="animate-rise-in">
       <div className="flex items-baseline justify-between gap-3">
@@ -38,9 +219,21 @@ function SpendRow({
           {row.paidUsd !== null ? (
             <>
               <Money usd={row.paidUsd} size="sm" />{" "}
-              <span className="text-xs text-muted">
-                {row.settlement === "x402" ? "paid via x402" : "paid"}
-              </span>
+              {row.settlement === "x402" ? (
+                <span className="text-xs text-muted">
+                  paid via x402
+                  {gatewayRef !== null ? (
+                    <>
+                      {" · "}
+                      <span className="font-mono" title={gatewayRef}>
+                        {shortRef(gatewayRef)}
+                      </span>
+                    </>
+                  ) : null}
+                </span>
+              ) : row.settlement === "prepaid" ? (
+                <span className="text-xs text-muted">metered</span>
+              ) : null}
             </>
           ) : row.estUsd !== null ? (
             <>
@@ -50,15 +243,53 @@ function SpendRow({
           ) : null}
         </span>
       </div>
-      {row.note !== null ? (
-        <p className="mt-1 pl-7 text-sm text-foreground/80">{row.note}</p>
+      {note !== null ? (
+        <p className="mt-1 pl-7 text-sm text-foreground/80">{note}</p>
       ) : null}
+    </li>
+  );
+}
+
+function ErrorRow({
+  stage,
+  message,
+  count,
+}: {
+  stage: string;
+  message: string;
+  count: number;
+}) {
+  const { label, transient } = errorPresentation(stage, message);
+  return (
+    <li className="animate-rise-in pl-7 text-sm">
+      <details>
+        <summary
+          className={`cursor-pointer list-none [&::-webkit-details-marker]:hidden ${
+            transient ? "text-muted" : "text-danger"
+          }`}
+        >
+          {label}
+          {count > 1 ? (
+            <span className="ml-2 text-xs text-muted">tried {count} times</span>
+          ) : null}
+          <span className="ml-2 text-xs text-muted underline decoration-dotted">
+            details
+          </span>
+        </summary>
+        <p className="mt-1 break-words text-xs text-muted">
+          {stage}: {message}
+        </p>
+      </details>
     </li>
   );
 }
 
 export default function AgentReceipt({ ledger }: { ledger: LedgerEntry[] }) {
   const receipt = projectReceipt(ledger);
+  const items = collapseErrors(receipt.rows);
+  const deferredEntry = ledger.find(
+    (e) => e.kind === "settle" && e.status === "deferred",
+  ) as SettleLedgerEntry | undefined;
 
   return (
     <div className="rounded-xl border border-edge bg-surface-raised p-4 font-mono">
@@ -66,13 +297,24 @@ export default function AgentReceipt({ ledger }: { ledger: LedgerEntry[] }) {
         SPOTTER receipt
       </p>
       <ol className="mt-3 space-y-3">
-        {receipt.rows.map((row, index) => {
+        {items.map((item) => {
+          if (item.kind === "errors") {
+            return (
+              <ErrorRow
+                key={item.key}
+                stage={item.stage}
+                message={item.message}
+                count={item.count}
+              />
+            );
+          }
+          const row = item.row;
           switch (row.kind) {
             case "spend":
-              return <SpendRow key={index} row={row} />;
+              return <SpendRow key={item.key} row={row} />;
             case "verdict":
               return (
-                <li key={index} className="animate-rise-in pl-7">
+                <li key={item.key} className="animate-rise-in pl-7">
                   <Verdict verified={row.verified} confidence={row.confidence} />
                   <p className="mt-1 text-sm text-foreground/80">
                     {row.escalation ? "second opinion: " : ""}
@@ -82,7 +324,7 @@ export default function AgentReceipt({ ledger }: { ledger: LedgerEntry[] }) {
               );
             case "reason":
               return (
-                <li key={index} className="animate-rise-in pl-7 text-sm">
+                <li key={item.key} className="animate-rise-in pl-7 text-sm">
                   <span className="text-xs uppercase tracking-wide text-muted">
                     decision
                   </span>{" "}
@@ -98,7 +340,7 @@ export default function AgentReceipt({ ledger }: { ledger: LedgerEntry[] }) {
               );
             case "record":
               return (
-                <li key={index} className="animate-rise-in pl-7 text-sm">
+                <li key={item.key} className="animate-rise-in pl-7 text-sm">
                   <span className="text-xs uppercase tracking-wide text-muted">
                     recorded on-chain
                   </span>
@@ -109,17 +351,28 @@ export default function AgentReceipt({ ledger }: { ledger: LedgerEntry[] }) {
                   ) : null}
                   {row.registryTx !== null ? (
                     <p className="mt-1">
-                      <ArcTxLink txHash={row.registryTx} label="verdict registry tx" />
+                      <ArcTxLink
+                        txHash={row.registryTx}
+                        label="verdict registry tx"
+                      />
                     </p>
                   ) : null}
                 </li>
               );
             case "settle":
               return (
-                <li key={index} className="animate-rise-in pl-7 text-sm">
+                <li key={item.key} className="animate-rise-in pl-7 text-sm">
                   {row.status === "settled" && row.paidUsd !== null ? (
                     <span>
-                      settled: <Money usd={row.paidUsd} sign="+" size="sm" /> paid
+                      settled: <Money usd={row.paidUsd} sign="+" size="sm" />{" "}
+                      paid
+                    </span>
+                  ) : row.status === "deferred" ? (
+                    <span className="text-muted">
+                      {deferredSettleCopy(
+                        deferredEntry?.periodEndIso,
+                        row.note,
+                      )}
                     </span>
                   ) : (
                     <span className="text-muted">
@@ -131,12 +384,6 @@ export default function AgentReceipt({ ledger }: { ledger: LedgerEntry[] }) {
                       <ArcTxLink txHash={row.txHash} label="settle tx" />
                     </p>
                   ) : null}
-                </li>
-              );
-            case "error":
-              return (
-                <li key={index} className="animate-rise-in pl-7 text-sm text-danger">
-                  {row.stage}: {row.message}
                 </li>
               );
           }
