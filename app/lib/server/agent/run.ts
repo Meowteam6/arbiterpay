@@ -1,14 +1,16 @@
-// SPOTTER's run loop for one claim: plan, buy, read the attester, decide,
-// record on-chain, settle when settleable. Every step lands in the ledger
-// before anything else happens, and the ledger doubles as the idempotence
-// record - the browser polls this run and each poll resumes exactly where the
-// last one stopped. Nothing is bought twice, nothing is recorded twice, and
-// "paid" is only ever derived from a real AchieverPaid payout.
+// SPOTTER's run loop for one claim: plan, buy, read the attester, escalate
+// when the read is unreadable, decide, record on-chain, settle when
+// settleable. Every step lands in the ledger before anything else happens,
+// and the ledger doubles as the idempotence record - the browser polls this
+// run and each poll resumes exactly where the last one stopped. Nothing is
+// bought twice, nothing is recorded twice, and "paid" is only ever derived
+// from a real AchieverPaid payout.
 //
-// Two steps are deliberately pluggable behind their current implementations:
-// the buy step settles "prepaid" until the x402 marketplace purchase lands
-// (build item 4), and the reason step is deterministic until Gemini takes it
-// over (build item 5). The control flow they plug into is what this file owns.
+// The buy side (x402.ts) and the reason step (reason.ts) are injected via
+// RunDeps; this file owns the control flow between them. The cheap-first-
+// then-escalate shape is deliberate: the plan prints one cheap read, and the
+// vision-judge row appears only when that read comes back unreadable - an
+// unplanned purchase, decided live, under the frozen cap.
 
 import type { Address, Hex } from "viem";
 import {
@@ -16,9 +18,22 @@ import {
   defaultClaimCapUsd,
   findSpend,
   readLedger,
+  totalSpentUsd,
   LedgerInvariantError,
   type LedgerEntry,
 } from "@/lib/server/agent/ledger";
+import {
+  usdCents,
+  ATTESTER_READ_SERVICE,
+  VISION_JUDGE_SERVICE,
+  type BuyDeps,
+  type PurchaseResult,
+  type ServiceQuote,
+} from "@/lib/server/agent/x402";
+import type {
+  EscalationContext,
+  ReasonFn,
+} from "@/lib/server/agent/reason";
 import {
   recordResultAsSpotter,
   recordVerdictAsSpotter,
@@ -29,13 +44,10 @@ import {
   multiplierForConfidence,
   type Confidence,
   type PollResult,
+  type Verdict,
 } from "@/lib/server/judge";
 import { VERDICT_FACETS, type RecordVerdictOutcome } from "@/lib/server/verdict";
 import { optionalEnv } from "@/lib/server/env";
-
-/** What one attester read costs SPOTTER. Becomes a real x402 price in item 4. */
-export const ATTESTER_READ_USD = "0.02";
-const ATTESTER_SERVICE = "attester-read";
 
 export interface RunInput {
   goalId: Hex;
@@ -48,6 +60,8 @@ export interface RunInput {
 
 export interface RunDeps {
   spotter: SpotterDeps;
+  buy: BuyDeps;
+  reason: ReasonFn;
   poll: (attesterId: string, goalSpec: string) => Promise<PollResult>;
   legacyRecordResult: (
     poolId: bigint,
@@ -92,6 +106,128 @@ function sameAddress(a: string, b: string): boolean {
   return a.toLowerCase() === b.toLowerCase();
 }
 
+/** The escalation's verdict entry is keyed off the attester job with this
+ *  suffix so a resumed poll can recover the second opinion from the ledger. */
+function escalationRef(attesterId: string): string {
+  return `${attesterId}:vision-judge`;
+}
+
+function escalationVerdictOf(
+  entries: LedgerEntry[],
+  attesterId: string,
+): Extract<LedgerEntry, { kind: "verdict" }> | undefined {
+  return entries.find(
+    (e): e is Extract<LedgerEntry, { kind: "verdict" }> =>
+      e.kind === "verdict" && e.ref === escalationRef(attesterId),
+  );
+}
+
+/** Parse a verdict-shaped second opinion out of an escalation service
+ *  response. Anything else degrades to an opaque summary for the reason step. */
+function parseOpinion(data: unknown): {
+  verdict: Verdict | null;
+  summary: string | null;
+} {
+  if (typeof data === "object" && data !== null) {
+    const record = data as Record<string, unknown>;
+    if (
+      typeof record.verified === "boolean" &&
+      (record.confidence === "low" ||
+        record.confidence === "medium" ||
+        record.confidence === "high") &&
+      typeof record.reason === "string"
+    ) {
+      const verdict: Verdict = {
+        verified: record.verified,
+        confidence: record.confidence,
+        reason: record.reason,
+      };
+      return {
+        verdict,
+        summary: `verified=${verdict.verified}, confidence=${verdict.confidence}: ${verdict.reason}`,
+      };
+    }
+    return { verdict: null, summary: JSON.stringify(record).slice(0, 200) };
+  }
+  return { verdict: null, summary: null };
+}
+
+type PurchaseOutcome =
+  | { ok: true; ledger: LedgerEntry[]; purchase: PurchaseResult }
+  | { ok: false; ledger: LedgerEntry[]; message: string };
+
+/**
+ * Execute one service purchase under the claim cap.
+ *
+ * The headroom check runs BEFORE the buy because an x402 purchase moves real
+ * money the moment pay() runs - the ledger's own append-time invariant cannot
+ * protect a spend that already settled. The append afterwards is still the
+ * authority: if the actual price exceeded the estimate and breaks the cap,
+ * the invariant error is surfaced loudly, never swallowed.
+ */
+async function purchaseService(
+  deps: RunDeps,
+  goalId: Hex,
+  ledger: LedgerEntry[],
+  quote: ServiceQuote,
+  ref: string,
+  body: Record<string, unknown>,
+  notePrefix?: string,
+): Promise<PurchaseOutcome> {
+  const plan = entryOf(ledger, "plan");
+  if (plan === undefined) {
+    return {
+      ok: false,
+      ledger,
+      message: "no plan entry exists; SPOTTER emits its plan before any spend",
+    };
+  }
+  const spent = usdCents(totalSpentUsd(ledger));
+  const next = usdCents(quote.estUsd);
+  const cap = usdCents(plan.capUsd);
+  if (spent + next > cap) {
+    return {
+      ok: false,
+      ledger,
+      message:
+        `buying ${quote.service} at ${quote.estUsd} USDC would break the ` +
+        `${plan.capUsd} USDC cap for this claim (already spent ${totalSpentUsd(ledger)})`,
+    };
+  }
+
+  const purchase = await deps.buy.buy(quote, body);
+  const noteParts = [
+    notePrefix,
+    purchase.gatewayTx !== null ? `gateway tx ${purchase.gatewayTx}` : undefined,
+  ].filter((p): p is string => p !== undefined && p !== "");
+  try {
+    const updated = await appendLedger(goalId, {
+      kind: "spend",
+      service: quote.service,
+      label: quote.label,
+      amountUsd: purchase.amountUsd,
+      ref,
+      settlement: purchase.settlement,
+      note: noteParts.length > 0 ? noteParts.join(" ") : undefined,
+    });
+    return { ok: true, ledger: updated, purchase };
+  } catch (err) {
+    if (err instanceof LedgerInvariantError) {
+      // Money may already have moved for this purchase; say so explicitly.
+      return {
+        ok: false,
+        ledger,
+        message:
+          `${quote.service} purchase of ${purchase.amountUsd} USDC exceeded ` +
+          `the estimate and broke the claim cap AFTER settlement ` +
+          `(${purchase.gatewayTx !== null ? `gateway tx ${purchase.gatewayTx}` : purchase.settlement}): ` +
+          err.message,
+      };
+    }
+    throw err;
+  }
+}
+
 async function spotterHoldsRole(
   deps: RunDeps,
   role: "oracle" | "attester",
@@ -123,43 +259,47 @@ export async function runAgentForGoal(
     return { status: "paid", ledger };
   }
 
-  // PLAN - printed before any money moves, cap frozen at plan time.
+  // PLAN - printed before any money moves, cap frozen at plan time. The plan
+  // deliberately holds only the cheap read: when an escalation happens, its
+  // row prints unplanned, which is the moment the whole submission hangs on.
+  let attesterQuote: ServiceQuote | null = null;
+  const getAttesterQuote = async () => {
+    attesterQuote ??= await deps.buy.quoteAttesterRead();
+    return attesterQuote;
+  };
   if (entryOf(ledger, "plan") === undefined) {
+    const quote = await getAttesterQuote();
     ledger = await appendLedger(input.goalId, {
       kind: "plan",
       steps: [
-        {
-          service: ATTESTER_SERVICE,
-          label: "document read (TEE attester)",
-          estUsd: ATTESTER_READ_USD,
-        },
+        { service: quote.service, label: quote.label, estUsd: quote.estUsd },
       ],
       capUsd: defaultClaimCapUsd(),
     });
   }
 
-  // BUY - once per attester job. The cap check lives in the ledger append;
-  // a violation aborts the run before the service is consumed.
-  if (findSpend(ledger, ATTESTER_SERVICE, input.attesterId) === undefined) {
-    try {
+  // BUY - once per attester job, deduped by (service, attester id) so a
+  // re-poll never double-buys. A cap violation aborts the run before the
+  // service is consumed.
+  if (
+    findSpend(ledger, ATTESTER_READ_SERVICE, input.attesterId) === undefined
+  ) {
+    const outcome = await purchaseService(
+      deps,
+      input.goalId,
+      ledger,
+      await getAttesterQuote(),
+      input.attesterId,
+      { attesterId: input.attesterId, goalSpec: input.goalSpec },
+    );
+    ledger = outcome.ledger;
+    if (!outcome.ok) {
       ledger = await appendLedger(input.goalId, {
-        kind: "spend",
-        service: ATTESTER_SERVICE,
-        label: "document read (TEE attester)",
-        amountUsd: ATTESTER_READ_USD,
-        ref: input.attesterId,
-        settlement: "prepaid",
+        kind: "error",
+        stage: "buy",
+        message: outcome.message,
       });
-    } catch (err) {
-      if (err instanceof LedgerInvariantError) {
-        ledger = await appendLedger(input.goalId, {
-          kind: "error",
-          stage: "buy",
-          message: err.message,
-        });
-        return { status: "cap-exceeded", ledger };
-      }
-      throw err;
+      return { status: "cap-exceeded", ledger };
     }
   }
 
@@ -179,18 +319,103 @@ export async function runAgentForGoal(
     });
   }
 
-  // REASON - deterministic today, Gemini in item 5. Deadpan on purpose.
+  // ESCALATE - the cheap read completed but could not actually read the
+  // evidence (low confidence). SPOTTER buys exactly one second opinion,
+  // under the same frozen cap. A transport-failed inference never escalates:
+  // buying a second read of a job that never ran spends money on nothing.
+  // The second opinion's verdict, when the service returns one, lands as its
+  // own ledger verdict entry so a resumed poll recovers it.
+  let escalation: EscalationContext = { kind: "none" };
+  let effective: Verdict = verdict;
+  const priorEscalation = escalationVerdictOf(ledger, input.attesterId);
+  if (priorEscalation !== undefined) {
+    escalation = {
+      kind: "bought",
+      opinion: `verified=${priorEscalation.verified}, confidence=${priorEscalation.confidence}: ${priorEscalation.reason}`,
+    };
+    effective = {
+      verified: priorEscalation.verified,
+      confidence: priorEscalation.confidence,
+      reason: priorEscalation.reason,
+    };
+  } else if (
+    findSpend(ledger, VISION_JUDGE_SERVICE, input.attesterId) !== undefined
+  ) {
+    // Spend landed but the opinion was lost to a resume; do not buy again.
+    escalation = { kind: "bought", opinion: null };
+  } else if (
+    status === "completed" &&
+    verdict.confidence === "low" &&
+    entryOf(ledger, "reason") === undefined
+  ) {
+    const quote = await deps.buy.quoteVisionJudge();
+    const poolUsd = await deps.spotter.reader
+      .poolBalanceUsd?.(input.poolId)
+      .catch(() => undefined);
+    const escalationLine =
+      poolUsd !== undefined
+        ? `escalating. i can't read this and i'm not paying out ${poolUsd} USDC on something i can't read.`
+        : "escalating. i can't read this and i'm not paying out on something i can't read.";
+    const outcome = await purchaseService(
+      deps,
+      input.goalId,
+      ledger,
+      quote,
+      input.attesterId,
+      {
+        attesterId: input.attesterId,
+        goalSpec: input.goalSpec,
+        verdict: {
+          verified: verdict.verified,
+          confidence: verdict.confidence,
+          reason: verdict.reason,
+        },
+      },
+      escalationLine,
+    );
+    ledger = outcome.ledger;
+    if (outcome.ok) {
+      const opinion = parseOpinion(outcome.purchase.data);
+      escalation = { kind: "bought", opinion: opinion.summary };
+      if (opinion.verdict !== null) {
+        effective = opinion.verdict;
+        ledger = await appendLedger(input.goalId, {
+          kind: "verdict",
+          verified: opinion.verdict.verified,
+          confidence: opinion.verdict.confidence,
+          reason: opinion.verdict.reason,
+          ref: escalationRef(input.attesterId),
+        });
+      }
+    } else {
+      // Not an error state: the agent declines the purchase and decides with
+      // what it has. The reason step is told why.
+      escalation = { kind: "skipped", why: outcome.message };
+    }
+  }
+
+  // REASON - Gemini on Vertex via deps.reason, anchored to the deterministic
+  // rule and falling back to it loudly. Deadpan on purpose. The guardrail
+  // below is not the model's to negotiate: a decision can veto a payout but
+  // never mint one without a verified verdict behind it.
   let reason = entryOf(ledger, "reason");
   if (reason === undefined) {
-    const pay =
-      status === "completed" && verdict.verified && verdict.confidence !== "low";
-    ledger = await appendLedger(input.goalId, {
-      kind: "reason",
-      decision: pay ? "pay" : "no-pay",
-      note: pay
-        ? `verified, ${verdict.confidence} confidence. paying.`
-        : `not paying: ${verdict.reason}`,
+    const plan = entryOf(ledger, "plan");
+    const decided = await deps.reason({
+      goalSpec: input.goalSpec,
+      verdict: effective,
+      attesterStatus: status,
+      escalation,
+      capUsd: plan?.capUsd ?? defaultClaimCapUsd(),
+      spentUsd: totalSpentUsd(ledger),
     });
+    let decision = decided.decision;
+    let note = decided.note;
+    if (decision === "pay" && !effective.verified) {
+      decision = "no-pay";
+      note = `overruled to no-pay: no verified verdict backs this claim. ${note}`;
+    }
+    ledger = await appendLedger(input.goalId, { kind: "reason", decision, note });
     reason = entryOf(ledger, "reason");
   }
   if (reason?.decision !== "pay") {
@@ -201,7 +426,9 @@ export async function runAgentForGoal(
   // whichever key the chain currently trusts. Recorded exactly once; the
   // ledger entry lands only after BOTH writes are in.
   if (entryOf(ledger, "record") === undefined) {
-    const multiplierBps = multiplierForConfidence(verdict.confidence);
+    // An escalated claim records the second opinion's confidence: that is the
+    // verdict the pay decision actually rests on.
+    const multiplierBps = multiplierForConfidence(effective.confidence);
     const facets = VERDICT_FACETS[input.evidenceKind];
     try {
       let resultTx: string | undefined;
@@ -235,7 +462,7 @@ export async function runAgentForGoal(
         const r = await recordVerdictAsSpotter(deps.spotter, {
           goalId: input.goalId,
           verified: true,
-          confidence: verdict.confidence,
+          confidence: effective.confidence,
           attesterRef: input.attesterId,
           facets,
         });
@@ -246,7 +473,7 @@ export async function runAgentForGoal(
           input.poolId,
           input.address,
           true,
-          verdict.confidence,
+          effective.confidence,
           input.attesterId,
           facets,
         );

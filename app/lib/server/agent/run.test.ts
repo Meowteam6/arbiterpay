@@ -76,6 +76,54 @@ const verifiedPoll = vi.fn().mockResolvedValue({
   verdict: { verified: true, confidence: "high", reason: "flu shot on record" },
 });
 
+// Prepaid-settling buy fakes mirroring liveBuyDeps with no env configured.
+function fakeBuy(overrides: Record<string, unknown> = {}) {
+  return {
+    quoteAttesterRead: vi.fn().mockResolvedValue({
+      service: "attester-read",
+      label: "document read (TEE attester)",
+      estUsd: "0.02",
+      url: null,
+    }),
+    quoteVisionJudge: vi.fn().mockResolvedValue({
+      service: "vision-judge",
+      label: "vision judge (Gemini)",
+      estUsd: "0.35",
+      url: null,
+    }),
+    buy: vi
+      .fn()
+      .mockImplementation(async (quote: { estUsd: string }) => ({
+        amountUsd: quote.estUsd,
+        settlement: "prepaid",
+        gatewayTx: null,
+        data: null,
+      })),
+    ...overrides,
+  };
+}
+
+// Mirrors deterministicReason so existing flow expectations keep holding.
+function fakeReason() {
+  return vi
+    .fn()
+    .mockImplementation(
+      async (ctx: {
+        attesterStatus: string;
+        verdict: { verified: boolean; confidence: string; reason: string };
+      }) => {
+        const pay =
+          ctx.attesterStatus === "completed" &&
+          ctx.verdict.verified &&
+          ctx.verdict.confidence !== "low";
+        return {
+          decision: pay ? "pay" : "no-pay",
+          note: pay ? "paying." : `not paying: ${ctx.verdict.reason}`,
+        };
+      },
+    );
+}
+
 function makeDeps(overrides: Record<string, unknown> = {}) {
   return {
     spotter: {
@@ -83,6 +131,8 @@ function makeDeps(overrides: Record<string, unknown> = {}) {
       reader: fakeReader(),
       nowSeconds: () => 2_000n,
     },
+    buy: fakeBuy(),
+    reason: fakeReason(),
     poll: verifiedPoll,
     legacyRecordResult: vi.fn().mockResolvedValue("0xbeef" as Hex),
     legacyRecordVerdict: vi
@@ -226,6 +276,106 @@ describe("runAgentForGoal", () => {
     expect(
       result.ledger.find((e) => e.kind === "error"),
     ).toMatchObject({ stage: "record" });
+  });
+
+  it("escalates a low-confidence read: buys the vision judge unplanned, under the cap", async () => {
+    const { runAgentForGoal } = await loadRun();
+    const poll = vi.fn().mockResolvedValue({
+      status: "completed",
+      verdict: { verified: false, confidence: "low", reason: "no readable text" },
+    });
+    const buy = fakeBuy();
+    const deps = makeDeps({ poll, buy });
+
+    const result = await runAgentForGoal(deps, INPUT);
+
+    expect(buy.quoteVisionJudge).toHaveBeenCalled();
+    const spends = result.ledger.filter((e) => e.kind === "spend");
+    expect(spends).toHaveLength(2);
+    expect(spends[1]).toMatchObject({ service: "vision-judge", amountUsd: "0.35" });
+    expect(spends[1].note).toMatch(/^escalating\./);
+    // The plan still lists only the cheap read; the escalation is unplanned.
+    const plan = result.ledger.find((e) => e.kind === "plan");
+    expect(plan).toMatchObject({ steps: [{ service: "attester-read" }] });
+    // Unverified after escalation stays a no-pay.
+    expect(result.status).toBe("no-pay");
+  });
+
+  it("adopts a verified second opinion from the escalation service and pays", async () => {
+    const { runAgentForGoal } = await loadRun();
+    const poll = vi.fn().mockResolvedValue({
+      status: "completed",
+      verdict: { verified: false, confidence: "low", reason: "no readable text" },
+    });
+    const buy = fakeBuy({
+      buy: vi.fn().mockImplementation(async (quote: { service: string; estUsd: string }) => ({
+        amountUsd: quote.estUsd,
+        settlement: "x402",
+        gatewayTx: "gw-1",
+        data:
+          quote.service === "vision-judge"
+            ? { verified: true, confidence: "medium", reason: "scale reads 78.2kg" }
+            : null,
+      })),
+    });
+    const reader = fakeReader({
+      oracleAddress: vi.fn().mockResolvedValue(SPOTTER),
+      attesterAddress: vi.fn().mockResolvedValue(SPOTTER),
+    });
+    const deps = makeDeps({
+      poll,
+      buy,
+      spotter: { circle: fakeExecutor(), reader, nowSeconds: () => 2_000n },
+    });
+
+    const result = await runAgentForGoal(deps, INPUT);
+
+    expect(result.status).toBe("paid");
+    const verdicts = result.ledger.filter((e) => e.kind === "verdict");
+    expect(verdicts).toHaveLength(2);
+    expect(verdicts[1]).toMatchObject({ verified: true, confidence: "medium" });
+  });
+
+  it("skips an escalation the cap cannot cover and decides with what it has", async () => {
+    vi.stubEnv("AGENT_CLAIM_CAP_USD", "0.10");
+    const { runAgentForGoal } = await loadRun();
+    const poll = vi.fn().mockResolvedValue({
+      status: "completed",
+      verdict: { verified: false, confidence: "low", reason: "no readable text" },
+    });
+    const reason = vi.fn().mockImplementation(
+      async (ctx: { escalation: { kind: string } }) => {
+        expect(ctx.escalation.kind).toBe("skipped");
+        return { decision: "no-pay", note: "cannot afford a second opinion." };
+      },
+    );
+    const deps = makeDeps({ poll, reason });
+
+    const result = await runAgentForGoal(deps, INPUT);
+
+    expect(result.status).toBe("no-pay");
+    expect(result.ledger.filter((e) => e.kind === "spend")).toHaveLength(1);
+    expect(reason).toHaveBeenCalled();
+  });
+
+  it("overrules a pay decision that no verified verdict backs", async () => {
+    const { runAgentForGoal } = await loadRun();
+    const poll = vi.fn().mockResolvedValue({
+      status: "completed",
+      verdict: { verified: false, confidence: "high", reason: "wrong document" },
+    });
+    const reason = vi
+      .fn()
+      .mockResolvedValue({ decision: "pay", note: "seems fine to me." });
+    const deps = makeDeps({ poll, reason });
+
+    const result = await runAgentForGoal(deps, INPUT);
+
+    expect(result.status).toBe("no-pay");
+    const entry = result.ledger.find((e) => e.kind === "reason");
+    expect(entry).toMatchObject({ decision: "no-pay" });
+    expect((entry as { note: string }).note).toMatch(/overruled/);
+    expect(deps.legacyRecordResult).not.toHaveBeenCalled();
   });
 
   it("returns paid from the ledger fast path without re-running anything", async () => {

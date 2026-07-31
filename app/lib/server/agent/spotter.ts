@@ -40,6 +40,9 @@ export type SpotterExecutor = Pick<
 /** Chain reads the agent needs, injectable so tests never touch an RPC. */
 export interface ArcReader {
   getPoolState(poolId: bigint): Promise<{ settled: boolean; periodEnd: bigint }>;
+  /** The pool's USDC balance as a two-decimal USD string. Optional so
+   *  existing fakes keep compiling; callers must tolerate its absence. */
+  poolBalanceUsd?(poolId: bigint): Promise<string>;
   canSettle(goalId: Hex): Promise<boolean>;
   oracleAddress(): Promise<Address>;
   attesterAddress(): Promise<Address>;
@@ -353,6 +356,18 @@ export function arcReader(): ArcReader {
         args: [poolId],
       });
       return { settled: pool.settled, periodEnd: BigInt(pool.periodEnd) };
+    },
+    async poolBalanceUsd(poolId) {
+      const pool = await client.readContract({
+        address: pools(),
+        abi: POOLS_READ_ABI,
+        functionName: "getPool",
+        args: [poolId],
+      });
+      // Two-decimal USD, truncated: the escalation note must not overstate
+      // what is at stake.
+      const cents = pool.balance / 10_000n;
+      return `${cents / 100n}.${(cents % 100n).toString().padStart(2, "0")}`;
     },
     async canSettle(goalId) {
       return client.readContract({

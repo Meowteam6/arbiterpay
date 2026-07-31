@@ -14,13 +14,19 @@ vi.mock("@/lib/server/agent/run", () => ({
 vi.mock("@/lib/server/verdict", () => ({
   computeGoalId: (...args: unknown[]) => computeGoalId(...args),
   recordVerdict: vi.fn(),
-  VERDICT_FACETS: { document: 6, wearable: 3 },
+  VERDICT_FACETS: { document: 4, wearable: 1 },
 }));
 vi.mock("@/lib/server/agent/wallet", () => ({
   getCircleClient: vi.fn(() => ({})),
 }));
 vi.mock("@/lib/server/agent/spotter", () => ({
   arcReader: vi.fn(() => ({})),
+}));
+vi.mock("@/lib/server/agent/x402", () => ({
+  liveBuyDeps: vi.fn(() => ({})),
+}));
+vi.mock("@/lib/server/agent/reason", () => ({
+  geminiReason: vi.fn(),
 }));
 
 const { GET, POST } = await import("@/app/api/agent/run/[goalId]/route");

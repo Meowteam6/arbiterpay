@@ -19,6 +19,8 @@ import { runAgentForGoal, type RunDeps } from "@/lib/server/agent/run";
 import { readLedger } from "@/lib/server/agent/ledger";
 import { getCircleClient } from "@/lib/server/agent/wallet";
 import { arcReader } from "@/lib/server/agent/spotter";
+import { liveBuyDeps } from "@/lib/server/agent/x402";
+import { geminiReason } from "@/lib/server/agent/reason";
 import { pollInference } from "@/lib/server/judge";
 import { recordResult } from "@/lib/server/oracle";
 import { computeGoalId, recordVerdict } from "@/lib/server/verdict";
@@ -31,6 +33,8 @@ type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
 function liveDeps(): RunDeps {
   return {
     spotter: { circle: getCircleClient(), reader: arcReader() },
+    buy: liveBuyDeps(),
+    reason: geminiReason,
     poll: pollInference,
     legacyRecordResult: recordResult,
     legacyRecordVerdict: recordVerdict,
