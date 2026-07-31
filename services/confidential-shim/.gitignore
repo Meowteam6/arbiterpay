@@ -1,0 +1,6 @@
+# build output and deps
+node_modules/
+dist/
+
+# runtime job journals (metadata only, but still runtime state)
+data/

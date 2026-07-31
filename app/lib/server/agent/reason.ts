@@ -61,14 +61,65 @@ export function deterministicReason(ctx: ReasonContext): ReasonDecision {
 
 let cachedClient: GoogleGenAI | null = null;
 
+/** Service-account credentials parsed from GOOGLE_CREDENTIALS_JSON. */
+export interface InlineCredentials {
+  client_email: string;
+  private_key: string;
+}
+
+/**
+ * Production Gemini auth. Vercel has no filesystem for a
+ * GOOGLE_APPLICATION_CREDENTIALS key file, so ADC silently fails there and
+ * every claim's ledger printed "gemini unavailable". Instead the whole
+ * service-account JSON rides in one env var; this parses it and repairs the
+ * newline escaping that env-var round-trips inflict on the PEM key. Returns
+ * null on any problem - a malformed credential must never kill a claim, the
+ * ADC/deterministic fallback in geminiReason covers it.
+ */
+export function inlineCredentials(): InlineCredentials | null {
+  const raw = optionalEnv("GOOGLE_CREDENTIALS_JSON", "");
+  if (raw === "") return null;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (parsed === null || typeof parsed !== "object") return null;
+  const record = parsed as Record<string, unknown>;
+  if (
+    typeof record.client_email !== "string" ||
+    record.client_email.trim() === ""
+  ) {
+    return null;
+  }
+  if (
+    typeof record.private_key !== "string" ||
+    record.private_key.trim() === ""
+  ) {
+    return null;
+  }
+  return {
+    client_email: record.client_email,
+    private_key: record.private_key.replace(/\\n/g, "\n"),
+  };
+}
+
 function vertexClient(): GoogleGenAI | null {
   const project = optionalEnv("GOOGLE_CLOUD_PROJECT", "");
   if (project === "") return null;
   if (cachedClient === null) {
+    const credentials = inlineCredentials();
     cachedClient = new GoogleGenAI({
       vertexai: true,
       project,
       location: optionalEnv("VERTEX_LOCATION", "us-central1"),
+      // Inline credentials when provided; otherwise ADC (local dev with a key
+      // file or gcloud login). Scopes stay unset on purpose - the SDK injects
+      // the cloud-platform scope itself when scopes are omitted.
+      ...(credentials !== null
+        ? { googleAuthOptions: { credentials } }
+        : {}),
     });
   }
   return cachedClient;
