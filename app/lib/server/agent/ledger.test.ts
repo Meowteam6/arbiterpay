@@ -109,6 +109,39 @@ describe("agent ledger", () => {
     expect(findSpend(entries, "attester-read", "job-2")).toBeUndefined();
   });
 
+  it("round-trips the optional linkage fields other steps depend on", async () => {
+    const { appendLedger, readLedger } = await loadLedger();
+    await appendLedger(GOAL, {
+      ...plan(),
+      poolId: "7",
+      participant: "0x1111111111111111111111111111111111111111",
+    });
+    await appendLedger(GOAL, {
+      kind: "reason",
+      decision: "no-pay",
+      note: "not paying.",
+      ref: "job-1",
+    });
+    await appendLedger(GOAL, {
+      kind: "settle",
+      status: "deferred",
+      periodEndIso: "2026-08-01T00:00:00.000Z",
+      note: "the pool period is still running",
+    });
+
+    const entries = await readLedger(GOAL);
+    expect(entries[0]).toMatchObject({
+      kind: "plan",
+      poolId: "7",
+      participant: "0x1111111111111111111111111111111111111111",
+    });
+    expect(entries[1]).toMatchObject({ kind: "reason", ref: "job-1" });
+    expect(entries[2]).toMatchObject({
+      kind: "settle",
+      periodEndIso: "2026-08-01T00:00:00.000Z",
+    });
+  });
+
   it("keeps ledgers for different goals separate", async () => {
     const { appendLedger, readLedger } = await loadLedger();
     const otherGoal = "0x" + "cd".repeat(32);

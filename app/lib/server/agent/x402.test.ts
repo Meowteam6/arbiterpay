@@ -31,7 +31,7 @@ describe("usdCents", () => {
 });
 
 describe("liveBuyDeps without x402 env", () => {
-  it("quotes both services prepaid at their static estimates", async () => {
+  it("quotes all three services prepaid at their static estimates", async () => {
     const { liveBuyDeps } = await load();
     const deps = liveBuyDeps();
 
@@ -45,6 +45,12 @@ describe("liveBuyDeps without x402 env", () => {
       service: "vision-judge",
       label: "vision judge (Gemini)",
       estUsd: "0.35",
+      url: null,
+    });
+    expect(await deps.quoteChainRead()).toEqual({
+      service: "chain-read",
+      label: "chain verification read (QuickNode, x402)",
+      estUsd: "0.01",
       url: null,
     });
   });
@@ -62,6 +68,74 @@ describe("liveBuyDeps without x402 env", () => {
       settlement: "prepaid",
       gatewayTx: null,
       data: null,
+    });
+  });
+});
+
+describe("quoteChainRead with a spend key", () => {
+  it("defaults to QuickNode's Arc-testnet x402 endpoint and prices from the 402 offer", async () => {
+    vi.stubEnv("X402_PRIVATE_KEY", "ab".repeat(32));
+    const { liveBuyDeps } = await load();
+    const { GatewayClient } = await import("@circle-fin/x402-batching/client");
+    const supports = vi.fn().mockResolvedValue({
+      supported: true,
+      // QuickNode's live offer: $0.0001/request in USDC atomic units,
+      // rounded up to the whole cent the ledger requires.
+      requirements: { amount: "100" },
+    });
+    vi.mocked(GatewayClient).mockImplementation(function (this: unknown) {
+      return { supports } as unknown as InstanceType<typeof GatewayClient>;
+    });
+
+    const quote = await liveBuyDeps().quoteChainRead();
+
+    expect(supports).toHaveBeenCalledWith(
+      "https://x402.quicknode.com/arc-testnet/",
+    );
+    expect(quote).toEqual({
+      service: "chain-read",
+      label: "chain verification read (QuickNode, x402)",
+      estUsd: "0.01",
+      url: "https://x402.quicknode.com/arc-testnet/",
+    });
+  });
+
+  it("lets X402_CHAIN_READ_URL override the default endpoint", async () => {
+    vi.stubEnv("X402_PRIVATE_KEY", "ab".repeat(32));
+    vi.stubEnv("X402_CHAIN_READ_URL", "https://example.com/paid-rpc");
+    const { liveBuyDeps } = await load();
+    const { GatewayClient } = await import("@circle-fin/x402-batching/client");
+    const supports = vi.fn().mockResolvedValue({
+      supported: true,
+      requirements: { amount: "100" },
+    });
+    vi.mocked(GatewayClient).mockImplementation(function (this: unknown) {
+      return { supports } as unknown as InstanceType<typeof GatewayClient>;
+    });
+
+    const quote = await liveBuyDeps().quoteChainRead();
+
+    expect(supports).toHaveBeenCalledWith("https://example.com/paid-rpc");
+    expect(quote.url).toBe("https://example.com/paid-rpc");
+  });
+
+  it("degrades to prepaid when the endpoint preflight fails", async () => {
+    vi.stubEnv("X402_PRIVATE_KEY", "ab".repeat(32));
+    const { liveBuyDeps } = await load();
+    const { GatewayClient } = await import("@circle-fin/x402-batching/client");
+    vi.mocked(GatewayClient).mockImplementation(function (this: unknown) {
+      return {
+        supports: vi.fn().mockRejectedValue(new Error("endpoint down")),
+      } as unknown as InstanceType<typeof GatewayClient>;
+    });
+
+    const quote = await liveBuyDeps().quoteChainRead();
+
+    expect(quote).toEqual({
+      service: "chain-read",
+      label: "chain verification read (QuickNode, x402)",
+      estUsd: "0.01",
+      url: null,
     });
   });
 });

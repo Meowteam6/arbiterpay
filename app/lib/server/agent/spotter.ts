@@ -39,7 +39,11 @@ export type SpotterExecutor = Pick<
 
 /** Chain reads the agent needs, injectable so tests never touch an RPC. */
 export interface ArcReader {
-  getPoolState(poolId: bigint): Promise<{ settled: boolean; periodEnd: bigint }>;
+  /** periodStart is optional so pre-existing fakes keep compiling; the live
+   *  reader always sets it. The run route needs it to key wearable claims. */
+  getPoolState(
+    poolId: bigint,
+  ): Promise<{ settled: boolean; periodEnd: bigint; periodStart?: bigint }>;
   /** The pool's USDC balance as a two-decimal USD string. Optional so
    *  existing fakes keep compiling; callers must tolerate its absence. */
   poolBalanceUsd?(poolId: bigint): Promise<string>;
@@ -48,6 +52,26 @@ export interface ArcReader {
   attesterAddress(): Promise<Address>;
   participantRecorded(poolId: bigint, user: Address): Promise<boolean>;
   verdictRecorded(goalId: Hex): Promise<boolean>;
+  /**
+   * Blocks until the transaction is mined on the SAME RPC every other read
+   * here uses, throwing if it reverted. Circle reports a txHash for an EOA
+   * wallet at SENT - before inclusion - so a record write that returns on the
+   * hash alone lets the settle preflight read canSettle before the registry
+   * write lands, and a one-shot settle() can then burn the pool paying
+   * nobody. Waiting on the reading RPC closes that race.
+   */
+  waitForInclusion(txHash: Hex): Promise<void>;
+  /**
+   * The AchieverPaid payout this pool's settlement emitted for a participant,
+   * or null when it paid them nothing. One settle() pays EVERY eligible
+   * achiever in a single transaction, so "the pool is already settled" is not
+   * evidence that THIS participant went unpaid - the log is the authority.
+   * Optional so pre-existing fakes keep compiling.
+   */
+  settledPayout?(
+    poolId: bigint,
+    participant: Address,
+  ): Promise<{ txHash: Hex; amount: bigint } | null>;
   /** Waits for the receipt, throws if reverted, returns AchieverPaid payouts. */
   achieverPayouts(txHash: Hex): Promise<
     { participant: Address; amount: bigint }[]
@@ -102,9 +126,13 @@ async function executeAsSpotter(
     );
   }
 
+  // waitForState (not waitForTxHash): an EOA wallet has a txHash at SENT,
+  // pre-inclusion, and returning that early is the race this module must not
+  // reopen. CONFIRMED is Circle's own inclusion signal; callers still wait on
+  // the reading RPC via ArcReader.waitForInclusion as the authority.
   const polled = await circle.getTransaction({
     id,
-    waitForTxHash: true,
+    waitForState: "CONFIRMED",
   } as Parameters<SpotterExecutor["getTransaction"]>[0]);
   const tx = polled.data?.transaction;
   if (!tx) {
@@ -203,6 +231,9 @@ export async function recordResultAsSpotter(
       input.multiplierBps,
     ],
   });
+  // Do not report recorded until the write is mined on the RPC the settle
+  // preflights read; a hash alone is not on-chain state.
+  await deps.reader.waitForInclusion(txHash);
   return { status: "recorded", txHash };
 }
 
@@ -232,12 +263,18 @@ export async function recordVerdictAsSpotter(
       input.facets,
     ],
   });
+  // This write is the canSettle gate itself. Settling before it is mined
+  // burns the one-shot settle() paying nobody, so block here until the RPC
+  // that answers canSettle has it.
+  await deps.reader.waitForInclusion(txHash);
   return { status: "recorded", txHash };
 }
 
 // ------------------------------------------------------------- live reader
 
-const ACHIEVER_PAID_ABI = [
+// Exported so run.ts can parse AchieverPaid out of a paid chain-read receipt
+// with the exact same event shape the free-RPC verification uses.
+export const ACHIEVER_PAID_ABI = [
   {
     type: "event",
     name: "AchieverPaid",
@@ -355,7 +392,11 @@ export function arcReader(): ArcReader {
         functionName: "getPool",
         args: [poolId],
       });
-      return { settled: pool.settled, periodEnd: BigInt(pool.periodEnd) };
+      return {
+        settled: pool.settled,
+        periodEnd: BigInt(pool.periodEnd),
+        periodStart: BigInt(pool.periodStart),
+      };
     },
     async poolBalanceUsd(poolId) {
       const pool = await client.readContract({
@@ -407,6 +448,80 @@ export function arcReader(): ArcReader {
         functionName: "recorded",
         args: [goalId],
       });
+    },
+    async waitForInclusion(txHash) {
+      // Same viem client as every preflight read above, so "mined" here means
+      // mined where canSettle/participantRecorded will be answered next.
+      const receipt = await client.waitForTransactionReceipt({ hash: txHash });
+      if (receipt.status !== "success") {
+        throw new Error(`tx ${txHash} reverted on Arc testnet`);
+      }
+    },
+    async settledPayout(poolId, participant) {
+      // The RPC caps eth_getLogs at 100k blocks, so an earliest-to-latest
+      // query is rejected outright. settle() can only land after the pool's
+      // periodEnd (block.timestamp gate), so binary-search the first block
+      // past periodEnd and scan forward from there in capped ranges. In
+      // practice the settlement sits in the first range: the sweep settles
+      // pools within minutes of their period ending.
+      const pool = await client.readContract({
+        address: pools(),
+        abi: POOLS_READ_ABI,
+        functionName: "getPool",
+        args: [poolId],
+      });
+      const periodEnd = BigInt(pool.periodEnd);
+      const latest = await client.getBlock({ blockTag: "latest" });
+      if (latest.timestamp <= periodEnd) {
+        // A settled pool implies a block past periodEnd exists; a tip that
+        // disagrees is a stale or inconsistent RPC view. Unknown, not unpaid.
+        throw new Error(
+          `chain tip ${latest.number} predates pool ${poolId} periodEnd; cannot reconcile the payout yet`,
+        );
+      }
+      let lo = 0n;
+      let hi = latest.number;
+      while (lo < hi) {
+        const mid = (lo + hi) / 2n;
+        const block = await client.getBlock({ blockNumber: mid });
+        if (block.timestamp > periodEnd) {
+          hi = mid;
+        } else {
+          lo = mid + 1n;
+        }
+      }
+      const RANGE = 90_000n; // under the RPC's 100k getLogs window
+      const MAX_RANGES = 30;
+      let from = lo;
+      for (let i = 0; i < MAX_RANGES && from <= latest.number; i += 1) {
+        const to =
+          from + RANGE - 1n > latest.number ? latest.number : from + RANGE - 1n;
+        const logs = await client.getLogs({
+          address: pools(),
+          event: ACHIEVER_PAID_ABI[0],
+          args: { poolId, participant },
+          fromBlock: from,
+          toBlock: to,
+        });
+        const hit = logs.find(
+          (log) => log.args.amount !== undefined && log.args.amount > 0n,
+        );
+        if (hit !== undefined) {
+          return {
+            txHash: hit.transactionHash as Hex,
+            amount: hit.args.amount as bigint,
+          };
+        }
+        from = to + 1n;
+      }
+      if (from <= latest.number) {
+        // The scan budget ran out before covering the tip. Refusing to
+        // answer beats declaring a possibly-paid participant unpaid.
+        throw new Error(
+          `AchieverPaid scan for pool ${poolId} exhausted its range budget before reaching the chain tip; refusing to declare the participant unpaid`,
+        );
+      }
+      return null;
     },
     async achieverPayouts(txHash) {
       const receipt = await client.waitForTransactionReceipt({ hash: txHash });
