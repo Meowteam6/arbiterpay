@@ -17,7 +17,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "GoHealthMe",
   description:
-    "Sponsor-funded USDC pools on Arc that pay instant bounties for verified health goals.",
+    "Set a health goal, a sponsor puts up the USDC, and an agent named SPOTTER verifies it and pays you the moment it can prove you did it.",
 };
 
 export const viewport: Viewport = {
@@ -42,7 +42,8 @@ export default function RootLayout({
             {children}
           </main>
           <footer className="border-t border-edge px-4 py-6 text-center text-xs text-muted">
-            GoHealthMe — ETHGlobal New York 2026. Arc testnet, World ID, ENS.
+            GoHealthMe — settled by SPOTTER on Arc testnet. Your health data
+            never touches the chain.
           </footer>
         </Providers>
       </body>
