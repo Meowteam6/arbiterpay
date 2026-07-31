@@ -14,7 +14,7 @@ The agent is named **SPOTTER**. One name across every surface.
 
 ## The product does not change
 
-GoHealthMe stays GoHealthMe. Sponsor-funded health pools, World ID for one-human-one-entry, confidential AI verification in a TEE, instant USDC settlement on Arc.
+GoHealthMe stays GoHealthMe. Sponsor-funded health pools, one-wallet-one-entry enforced on-chain by `joinPool` (World ID was removed in the Circle build), confidential AI verification in a TEE, instant USDC settlement on Arc.
 
 **Do not rewrite this as a generic "autonomous underwriting agent" or "claims automation platform."** That framing was tried and rejected — it is what every B2B fintech entrant calls themselves, it is forgettable, and it throws away the thing that makes this memorable. Judges see hundreds of submissions. "Get paid in USDC the instant you hit your sleep streak, verified so nobody ever sees your health data" lands. "Autonomous underwriting" does not.
 

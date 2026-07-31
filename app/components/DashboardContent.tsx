@@ -344,8 +344,8 @@ export default function DashboardContent() {
           />
         ) : (joinedQuery.data ?? []).length === 0 ? (
           <EmptyState
-            title="You have not joined a pool yet"
-            detail="Pick a sponsor-funded goal, verify with World ID, and start earning."
+            title="Nothing on the line yet"
+            detail="Pick a goal somebody else's USDC is staked on. One wallet, one entry, and SPOTTER pays the moment you prove it."
             action={
               <Link
                 href="/pools"

@@ -210,7 +210,7 @@ export default function PoolDetail({ id }: { id: string }) {
             />
           </section>
 
-          {isDocGoal && hasJoined ? (
+          {hasJoined ? (
             <section className="rounded-2xl border border-accent/40 bg-surface p-5">
               <EvidenceUpload poolId={pool.id} goalSpec={pool.goalSpec} />
             </section>

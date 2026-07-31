@@ -3,6 +3,13 @@
 Onboarding doc for anyone (human or AI agent) picking up this build. Read this top to bottom first.
 Built at ETHGlobal New York 2026 by Andre Chuabio + Nikki Hu.
 
+> **2026-07 update (Circle build): World ID has been removed entirely.** Entry
+> is one wallet, one entry, enforced by `joinPool`'s on-chain dedupe; the
+> World verify routes, the idkit widget, and the WORLD_* env vars are gone,
+> and server gates now read pool membership from the contract
+> (`app/lib/server/pools.ts`). References to World ID below describe the
+> ETHGlobal build and are kept as history — do not re-wire them.
+
 ## What it is
 
 Sponsor-funded USDC reward pools for verified health goals. A sponsor (insurer, employer, brand)

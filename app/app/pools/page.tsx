@@ -23,9 +23,9 @@ export default function PoolsPage() {
             <Badge tone="warning">Arc Testnet</Badge>
           </div>
           <p className="mt-1 text-sm text-muted">
-            Live sponsor-funded pools on Arc testnet. Join with World ID, hit
-            the goal, get paid in USDC. USDC here is testnet only and has no
-            real value.
+            Live sponsor-funded pools on Arc testnet. Join with your wallet,
+            hit the goal, get paid in USDC. USDC here is testnet only and has
+            no real value.
           </p>
         </div>
         <Link

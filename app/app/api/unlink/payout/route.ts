@@ -1,9 +1,9 @@
 // POST /api/unlink/payout
 // Body: { address, poolId, goalId, unlinkAddress, rewardUsdc? }
-// Gates on World verification for the pool, then treasury deposit -> private
+// Gates on on-chain pool membership, then treasury deposit -> private
 // transfer to the user's wallet-derived Unlink address. Idempotent per goalId.
 import { isAddress, type Address } from "viem";
-import { getVerification } from "@/lib/server/world";
+import { participantJoined } from "@/lib/server/pools";
 import { treasuryUnlinkClient, ARC_USDC_ADDRESS } from "@/lib/server/unlink";
 import { runPrivatePayout } from "@/lib/server/unlink-payout";
 import { linkUnlinkAddress } from "@/lib/server/claims";
@@ -24,11 +24,11 @@ export async function POST(request: Request) {
     if (typeof unlinkAddress !== "string" || unlinkAddress === "")
       return jsonError(400, "unlinkAddress required (wallet-derived, sent from browser)");
 
-    const verification = await getVerification(address as Address, String(poolId));
-    if (verification === null)
+    const joined = await participantJoined(BigInt(poolId), address as Address);
+    if (!joined)
       return jsonError(
         403,
-        `No verified World ID record for ${address} in pool ${String(poolId)}`,
+        `${address} has not joined pool ${String(poolId)} on-chain`,
       );
 
     // Persist the EVM address → Unlink address mapping for reference.

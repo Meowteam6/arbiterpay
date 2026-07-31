@@ -137,9 +137,25 @@ function CreatePoolInner() {
     setInitiative(template.initiative);
     setGoalSpec(template.goal);
     setEntryFee(template.entryFee);
+    // Every doc template has a zero entry fee, and a fixed bounty is a
+    // multiple of the entry fee -- model 0 at fee 0 creates a pool that
+    // settles to zero for everyone. Templates therefore always split the pot.
+    setBountyModel(1);
     setInitialFunding(template.funding);
     setFormError(null);
   };
+
+  // Fixed bounty pays entryFee * multiplier, so at a zero fee it pays nothing:
+  // the transaction succeeds and AchieverPaid never fires. Guard both in the
+  // UI (radio disabled below) and at submit time (derived model), so no pool
+  // that structurally cannot pay can be created from this form.
+  const feeIsZero = (() => {
+    try {
+      return parseUsdc(entryFee.trim() === "" ? "0" : entryFee.trim()) === 0n;
+    } catch {
+      return false;
+    }
+  })();
 
   const submit = async () => {
     setFormError(null);
@@ -188,7 +204,7 @@ function CreatePoolInner() {
           entryFeeUsdc,
           periodStart,
           periodEnd,
-          bountyModel,
+          entryFeeUsdc === 0n ? 1 : bountyModel,
           fundingUsdc,
         ],
       });
@@ -375,11 +391,16 @@ function CreatePoolInner() {
         <fieldset className="block text-sm font-medium">
           <legend>Payout model</legend>
           <div className="mt-2 space-y-2">
-            <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-edge bg-surface-raised p-3">
+            <label
+              className={`flex items-start gap-3 rounded-xl border border-edge bg-surface-raised p-3 ${
+                feeIsZero ? "cursor-not-allowed opacity-60" : "cursor-pointer"
+              }`}
+            >
               <input
                 type="radio"
                 name="bountyModel"
-                checked={bountyModel === 0}
+                checked={bountyModel === 0 && !feeIsZero}
+                disabled={feeIsZero}
                 onChange={() => setBountyModel(0)}
                 className="mt-1"
               />
@@ -388,7 +409,8 @@ function CreatePoolInner() {
                   Fixed bounty per achiever
                 </span>
                 <span className="block text-xs font-normal text-muted">
-                  Each verified achiever receives the same fixed payout.
+                  Each verified achiever receives the same fixed payout, a
+                  multiple of the entry fee. Needs an entry fee above zero.
                 </span>
               </span>
             </label>
@@ -396,7 +418,7 @@ function CreatePoolInner() {
               <input
                 type="radio"
                 name="bountyModel"
-                checked={bountyModel === 1}
+                checked={bountyModel === 1 || feeIsZero}
                 onChange={() => setBountyModel(1)}
                 className="mt-1"
               />

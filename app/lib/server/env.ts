@@ -6,7 +6,7 @@ export function requireEnv(name: string): string {
   const value = process.env[name];
   if (value === undefined || value.trim() === "") {
     throw new Error(
-      `Missing required env var ${name}. Add it to gohealthme/.env (see .env.example).`,
+      `Missing required env var ${name}. Add it to the repo-root .env (see .env.example).`,
     );
   }
   return value.trim();

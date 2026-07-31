@@ -1,17 +1,18 @@
 import Link from "next/link";
+import GoalIntent from "@/components/GoalIntent";
 
 const steps = [
   {
-    title: "Sponsors fund pools",
-    body: "Brands and insurers stake USDC bounties on Arc behind concrete health goals: sleep streaks, workouts, daily movement.",
+    title: "Say what you are going to do",
+    body: "Sleep streak, flu shot, back in the gym. A sponsor's USDC is already staked behind it - not yours.",
   },
   {
-    title: "Verified humans join",
-    body: "One World ID proof per pool. No bots, no duplicate entries, no sybil farming the bounty.",
+    title: "SPOTTER buys the proof-check",
+    body: "An agent with its own wallet buys whatever verification your claim needs, per claim, under a hard budget. Every cent prints on screen.",
   },
   {
-    title: "Hit the goal, get paid instantly",
-    body: "A privacy-preserving oracle verifies outcomes from wearable data. The moment you achieve, USDC lands in your wallet.",
+    title: "Paid the second it is proven",
+    body: "The verdict comes out of a confidential enclave - nobody ever sees your health data - and SPOTTER pays you from its own wallet. No human in the loop.",
   },
 ];
 
@@ -20,27 +21,24 @@ export default function Home() {
     <div className="flex flex-col gap-14 py-6 sm:py-12">
       <section className="text-center">
         <p className="text-sm font-semibold uppercase tracking-widest text-accent">
-          Health goals with real stakes
+          Free money with extra steps. The steps are the point.
         </p>
         <h1 className="mx-auto mt-4 max-w-2xl text-4xl font-bold leading-tight tracking-tight sm:text-5xl">
-          Get paid in USDC the moment you hit a verified health goal
+          Your goal. Somebody else&apos;s money.
         </h1>
         <p className="mx-auto mt-5 max-w-xl text-lg leading-relaxed text-muted">
-          Sponsor-funded bounty pools on Arc. World ID keeps them human-only.
-          Your health data stays private; only verified outcomes go on-chain.
+          Say what you are going to do. A sponsor puts up the USDC. An agent
+          buys whatever it needs to check your proof, decides, and pays you out
+          of its own wallet. No human in the loop, and nobody ever sees your
+          health data.
         </p>
-        <div className="mt-8 flex flex-col items-center justify-center gap-3 sm:flex-row">
+        <GoalIntent />
+        <div className="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
           <Link
             href="/pools"
-            className="w-full rounded-xl bg-accent-strong px-8 py-4 text-base font-semibold text-background hover:bg-accent sm:w-auto"
+            className="text-sm font-medium text-muted underline-offset-4 hover:text-foreground hover:underline"
           >
-            Browse pools
-          </Link>
-          <Link
-            href="/dashboard"
-            className="w-full rounded-xl border border-edge px-8 py-4 text-base font-semibold text-foreground hover:bg-surface-raised sm:w-auto"
-          >
-            My goals
+            or browse the live pools
           </Link>
         </div>
       </section>

@@ -2,16 +2,16 @@
 
 Verified health goals with instant USDC rewards. Built at ETHGlobal New York 2026.
 
-Insurers already pay people for healthy behaviors — through opaque points systems and gift cards that arrive weeks later. GoHealthMe puts that model on-chain: sponsor-funded USDC pools pay out the instant a verified behavior happens, gated so every participant is a unique human, with the verification done by a confidential, decentralized oracle rather than a company.
+Insurers already pay people for healthy behaviors — through opaque points systems and gift cards that arrive weeks later. GoHealthMe puts that model on-chain: sponsor-funded USDC pools pay out the instant a verified behavior happens, with the verification done by a confidential, decentralized oracle rather than a company, and the settlement run by an agent named SPOTTER from its own Circle wallet.
 
-Partners: Arc (USDC settlement chain), World (proof-of-human), Chainlink (CRE + Confidential AI Attester verification).
+Partners: Arc (USDC settlement chain), Circle (agent wallet + service payments), Chainlink (CRE + Confidential AI Attester verification).
 
 ## How it works
 
 1. Anyone funds an initiative pool (sleep, workouts, preventive care) with USDC and published bounties
-2. Participants join with a World ID proof — one human, one entry; the product breaks without proof-of-human
+2. Participants join with their wallet — one wallet, one entry, enforced by the pool contract
 3. Health data is verified off-chain (wearables via Junction — WHOOP/Oura/Fitbit/Garmin — or a Chainlink Confidential AI Attester judging the goal inside a TEE); only the verdict ever touches the chain
-4. The pool settles instantly: achievers get paid (optionally to a private Unlink account derived from their own wallet signature, with no on-chain link to the goal), forfeits roll back into the pool
+4. SPOTTER, the settlement agent, buys the verification it needs per claim, decides, and settles the pool from its own Circle wallet: achievers get paid (optionally to a private Unlink account derived from their own wallet signature, with no on-chain link to the goal), forfeits roll back into the pool
 5. Optional: stake on your own streak for a multiplier, back someone else's goal, or top up USDC in one tap via Blink
 
 ## Architecture
@@ -19,7 +19,6 @@ Partners: Arc (USDC settlement chain), World (proof-of-human), Chainlink (CRE + 
 ```
 Next.js (frontend + API) -- Dynamic embedded wallets + Unlink private payouts
    |          |
-   |          +-- World ID cloud verify (backend) --> nullifier gates joinPool
    |          +-- Junction Link (WHOOP/Oura/Fitbit/Garmin) -> health summary
    |                               |
    |              verdict path A (live demo): oracle signer
@@ -41,8 +40,8 @@ Privacy invariant: raw health data never touches the chain — the Confidential 
 
 ## Repo layout
 
-- `contracts/` — Foundry: `HealthPools.sol` (pools, World ID nullifier gating, settle, backing, multipliers) and `HealthVerdict.sol` (Chainlink verdict registry + `onReport` receiver); tests; deploy script
-- `app/` — Next.js App Router: frontend and API routes (World verify, WHOOP, oracle signer)
+- `contracts/` — Foundry: `HealthPools.sol` (pools, one-entry nullifier dedupe, settle, backing, multipliers) and `HealthVerdict.sol` (Chainlink verdict registry + `onReport` receiver); tests; deploy script
+- `app/` — Next.js App Router: frontend and API routes (evidence, agent run, oracle signer)
 - `cre/` — Chainlink CRE goal-verification workflow (Confidential AI Attester callback pattern)
 - `scripts/` — `demo-reset.sh` (clean redeploy + seed) and `happy-path-test.sh` (live end-to-end proof)
 

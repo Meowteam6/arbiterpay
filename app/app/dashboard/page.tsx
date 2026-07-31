@@ -13,7 +13,7 @@ export default function DashboardPage() {
           My goals
         </h1>
         <p className="mt-1 text-sm text-muted">
-          Pools you have joined and your verified progress.
+          What you said you would do, and what SPOTTER has paid you for it.
         </p>
       </div>
       {DYNAMIC_CONFIGURED ? (

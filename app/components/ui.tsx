@@ -112,6 +112,85 @@ export function Badge({
   );
 }
 
+// Honest-core primitives. Amounts, verdicts, and stamps render through these
+// three components with no slot for an adjective: the brand voice is loud
+// around the numbers, never inside them. Anything on screen that claims money
+// moved or a goal was verified must come through here.
+
+export function Money({
+  usd,
+  sign,
+  size = "md",
+}: {
+  /** Whole-USD string with two decimals, exactly as the ledger recorded it. */
+  usd: string;
+  sign?: "+" | "-";
+  size?: "sm" | "md" | "lg" | "xl";
+}) {
+  const sizes: Record<string, string> = {
+    sm: "text-sm",
+    md: "text-base",
+    lg: "text-2xl",
+    xl: "text-4xl",
+  };
+  return (
+    <span
+      className={`font-mono font-semibold tabular-nums text-foreground ${sizes[size]}`}
+    >
+      {sign !== undefined ? sign : ""}
+      {usd} USDC
+    </span>
+  );
+}
+
+export function Verdict({
+  verified,
+  confidence,
+}: {
+  verified: boolean;
+  confidence?: "low" | "medium" | "high";
+}) {
+  return (
+    <span className="inline-flex items-center gap-2">
+      <span
+        className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${
+          verified
+            ? "border-accent/30 bg-accent-deep text-accent"
+            : "border-danger/40 bg-danger/10 text-danger"
+        }`}
+      >
+        {verified ? "Verified" : "Not verified"}
+      </span>
+      {confidence !== undefined ? (
+        <span className="text-xs uppercase tracking-wide text-muted">
+          {confidence} confidence
+        </span>
+      ) : null}
+    </span>
+  );
+}
+
+export function Stamp({
+  children,
+  tone = "accent",
+}: {
+  children: ReactNode;
+  tone?: "accent" | "danger";
+}) {
+  return (
+    <span
+      className={`animate-stamp-in inline-block rounded-md border-2 px-3 py-1 font-mono text-sm font-bold uppercase tracking-widest ${
+        tone === "accent"
+          ? "border-accent text-accent"
+          : "border-danger text-danger"
+      }`}
+      style={{ transform: "rotate(-3deg)" }}
+    >
+      {children}
+    </span>
+  );
+}
+
 export function Stat({ label, value }: { label: string; value: ReactNode }) {
   return (
     <div className="rounded-xl border border-edge bg-surface-raised p-4">

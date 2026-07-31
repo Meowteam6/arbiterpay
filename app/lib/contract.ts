@@ -6,6 +6,7 @@ import {
   parseAbiItem,
   parseUnits,
   type Address,
+  type Hex,
   type PublicClient,
 } from "viem";
 import { arcTestnet } from "@/lib/chains";
@@ -157,6 +158,16 @@ export const healthPoolsAbi = [
     stateMutability: "view",
     inputs: [],
     outputs: [{ name: "", type: "uint256" }],
+  },
+  {
+    type: "function",
+    name: "computeGoalId",
+    stateMutability: "view",
+    inputs: [
+      { name: "poolId", type: "uint256" },
+      { name: "participant", type: "address" },
+    ],
+    outputs: [{ name: "", type: "bytes32" }],
   },
   {
     type: "event",
@@ -364,6 +375,23 @@ export async function fetchParticipant(
     nullifierHash: p.nullifierHash,
     backingTotal: p.backingTotal,
   };
+}
+
+/**
+ * Ask the contract for the goal id of a (pool, participant) pair. The agent
+ * run route keys its ledger by this id and re-derives it server-side, so the
+ * browser must read it from the same source of truth, never re-derive it.
+ */
+export async function fetchGoalId(id: bigint, user: Address): Promise<Hex> {
+  const address = getHealthPoolsAddress();
+  if (address === null) throw new ContractNotConfiguredError();
+  const client = getArcPublicClient();
+  return client.readContract({
+    address,
+    abi: healthPoolsAbi,
+    functionName: "computeGoalId",
+    args: [id, user],
+  });
 }
 
 // ------------------------------------------------------------------ helpers
