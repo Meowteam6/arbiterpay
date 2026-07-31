@@ -60,6 +60,70 @@ describe("deterministicReason", () => {
   });
 });
 
+describe("inlineCredentials", () => {
+  const KEY_ESCAPED =
+    "-----BEGIN PRIVATE KEY-----\\nMIIEvQIBADANBg\\n-----END PRIVATE KEY-----\\n";
+  const KEY_REPAIRED =
+    "-----BEGIN PRIVATE KEY-----\nMIIEvQIBADANBg\n-----END PRIVATE KEY-----\n";
+
+  it("parses a valid service-account JSON and repairs escaped newlines", async () => {
+    vi.stubEnv(
+      "GOOGLE_CREDENTIALS_JSON",
+      JSON.stringify({
+        type: "service_account",
+        client_email: "spotter@gohealthmev2.iam.gserviceaccount.com",
+        private_key: KEY_ESCAPED,
+      }),
+    );
+    const { inlineCredentials } = await load();
+    expect(inlineCredentials()).toEqual({
+      client_email: "spotter@gohealthmev2.iam.gserviceaccount.com",
+      private_key: KEY_REPAIRED,
+    });
+  });
+
+  it("passes through a key that already has real newlines", async () => {
+    vi.stubEnv(
+      "GOOGLE_CREDENTIALS_JSON",
+      JSON.stringify({
+        client_email: "spotter@gohealthmev2.iam.gserviceaccount.com",
+        private_key: KEY_REPAIRED,
+      }),
+    );
+    const { inlineCredentials } = await load();
+    expect(inlineCredentials()?.private_key).toBe(KEY_REPAIRED);
+  });
+
+  it("returns null when the env var is missing or empty", async () => {
+    vi.stubEnv("GOOGLE_CREDENTIALS_JSON", "");
+    const { inlineCredentials } = await load();
+    expect(inlineCredentials()).toBeNull();
+  });
+
+  it("returns null on malformed JSON", async () => {
+    vi.stubEnv("GOOGLE_CREDENTIALS_JSON", "{not json");
+    const { inlineCredentials } = await load();
+    expect(inlineCredentials()).toBeNull();
+  });
+
+  it("returns null when client_email or private_key is missing or non-string", async () => {
+    const { inlineCredentials } = await load();
+    for (const bad of [
+      { private_key: KEY_ESCAPED },
+      { client_email: "spotter@gohealthmev2.iam.gserviceaccount.com" },
+      { client_email: 7, private_key: KEY_ESCAPED },
+      { client_email: "a@b.c", private_key: 7 },
+      { client_email: "", private_key: KEY_ESCAPED },
+      { client_email: "a@b.c", private_key: "" },
+      null,
+      "just a string",
+    ]) {
+      vi.stubEnv("GOOGLE_CREDENTIALS_JSON", JSON.stringify(bad));
+      expect(inlineCredentials(), JSON.stringify(bad)).toBeNull();
+    }
+  });
+});
+
 describe("geminiReason", () => {
   it("falls back loudly when GOOGLE_CLOUD_PROJECT is unset", async () => {
     const { geminiReason } = await load();
@@ -104,6 +168,62 @@ describe("geminiReason", () => {
 
     expect(result.decision).toBe("pay");
     expect(result.note).toMatch(/no usable decision/);
+  });
+
+  it("passes inline credentials to the Vertex client when configured", async () => {
+    vi.stubEnv("GOOGLE_CLOUD_PROJECT", "gohealthmev2");
+    vi.stubEnv(
+      "GOOGLE_CREDENTIALS_JSON",
+      JSON.stringify({
+        client_email: "spotter@gohealthmev2.iam.gserviceaccount.com",
+        private_key: "-----BEGIN PRIVATE KEY-----\\nabc\\n-----END PRIVATE KEY-----\\n",
+      }),
+    );
+    generateContent.mockResolvedValue({
+      text: '{"decision": "pay", "note": "credentials worked."}',
+    });
+    const { geminiReason } = await load();
+
+    await geminiReason(ctx());
+
+    const { GoogleGenAI } = await import("@google/genai");
+    const options = vi.mocked(GoogleGenAI).mock.calls[0][0] as unknown as {
+      vertexai: boolean;
+      project: string;
+      googleAuthOptions?: {
+        credentials: { client_email: string; private_key: string };
+        scopes?: unknown;
+      };
+    };
+    expect(options.vertexai).toBe(true);
+    expect(options.project).toBe("gohealthmev2");
+    expect(options.googleAuthOptions).toEqual({
+      credentials: {
+        client_email: "spotter@gohealthmev2.iam.gserviceaccount.com",
+        private_key:
+          "-----BEGIN PRIVATE KEY-----\nabc\n-----END PRIVATE KEY-----\n",
+      },
+    });
+    // Scopes stay unset so the SDK injects cloud-platform itself.
+    expect(options.googleAuthOptions).not.toHaveProperty("scopes");
+  });
+
+  it("omits googleAuthOptions entirely when inline credentials are absent", async () => {
+    vi.stubEnv("GOOGLE_CLOUD_PROJECT", "gohealthmev2");
+    vi.stubEnv("GOOGLE_CREDENTIALS_JSON", "");
+    generateContent.mockResolvedValue({
+      text: '{"decision": "pay", "note": "adc worked."}',
+    });
+    const { geminiReason } = await load();
+
+    await geminiReason(ctx());
+
+    const { GoogleGenAI } = await import("@google/genai");
+    const options = vi.mocked(GoogleGenAI).mock.calls[0][0] as unknown as Record<
+      string,
+      unknown
+    >;
+    expect(options).not.toHaveProperty("googleAuthOptions");
   });
 
   it("falls back to the anchor when the call throws", async () => {
