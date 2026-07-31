@@ -112,8 +112,8 @@ describe("fail-closed verdict", () => {
   });
 
   it("(b3) a CLIENT-SUPPLIED mock id is refused even when a real key is configured", async () => {
-    // attesterId arrives straight from the /api/evidence/result request body, so
-    // a caller can hand pollInference a "mock-" id directly without ever going
+    // attesterId arrives straight from the /api/agent/run/<goalId> request body,
+    // so a caller can hand pollInference a "mock-" id directly without ever going
     // through submitInference. If that short-circuited to the mock verdict,
     // anyone could mint {verified:true, confidence:high} for a goal they never
     // met, have it written to HealthPools at a 2x multiplier, and open the

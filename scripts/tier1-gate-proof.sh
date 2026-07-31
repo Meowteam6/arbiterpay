@@ -61,7 +61,7 @@ cast send "$NEWPOOLS" 'createPool(string,string,uint256,uint64,uint64,uint8,uint
 PID=$(cast call "$NEWPOOLS" 'poolCount()(uint256)' --rpc-url "$RPC"); PID=${PID%% *}
 echo "   pool $PID created (2 USDC pot, split-pot, ends in ~120s)"
 
-# 4) Both join (synthetic nullifiers; on-chain join doesn't verify the World proof)
+# 4) Both join (synthetic nullifiers; joinPool only dedupes them on-chain)
 cast send "$NEWPOOLS" 'joinPool(uint256,uint256)' "$PID" 111 --private-key "$APK" --rpc-url "$RPC" >/dev/null && echo "   A joined"
 cast send "$NEWPOOLS" 'joinPool(uint256,uint256)' "$PID" 222 --private-key "$OPK" --rpc-url "$RPC" >/dev/null && echo "   B joined"
 

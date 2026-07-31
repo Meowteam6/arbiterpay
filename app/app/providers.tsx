@@ -45,7 +45,21 @@ export default function Providers({ children }: { children: ReactNode }) {
 
   const environmentId = process.env.NEXT_PUBLIC_DYNAMIC_ENVIRONMENT_ID ?? "";
   if (environmentId === "") {
-    return <DynamicMissingBanner />;
+    // No Dynamic env id: skip the Dynamic providers but ALWAYS render the app.
+    // Wallet-dependent components each fall back via DYNAMIC_CONFIGURED, and
+    // none of them mounts a Dynamic hook when it is false, so wagmi + react-query
+    // are all the context the rest of the site needs. Returning only the banner
+    // here used to blank the whole site and make every fallback dead code.
+    return (
+      <>
+        <DynamicMissingBanner />
+        <WagmiProvider config={wagmiConfig}>
+          <QueryClientProvider client={queryClient}>
+            {children}
+          </QueryClientProvider>
+        </WagmiProvider>
+      </>
+    );
   }
 
   return (

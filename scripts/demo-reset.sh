@@ -131,16 +131,20 @@ seed_pool() {
   echo "    seeded: $initiative"
 }
 
+# Bounty model rule: model 0 (fixed bounty) pays entryFee * multiplier, so an
+# entry-0 pool on model 0 structurally pays ZERO — settle succeeds, nobody is
+# paid. Every entry-0 pool MUST use model 1 (pro-rata pot split).
 echo "==> Seeding pools"
 seed_pool "sleep"    "Sleep performance score 75 or higher for 3 consecutive nights (sponsored by Dreamwell Mattress)" 250000 3 0
 seed_pool "recovery" "WHOOP recovery 60 percent or higher on 5 of 7 days (sponsored by Vitality Insurance)"          250000 7 1
-seed_pool "steps"    "10,000 steps daily for 5 days (sponsored by Iron Gym)"                                         0      5 0
+seed_pool "steps"    "10,000 steps daily for 5 days (sponsored by Iron Gym)"                                         0      5 1
 
 # Document-verified preventive-care pools (UnitedHealthcare-style incentives).
-# entry 0 (free to join), 30-day period, fixed-bounty model (0). Funding defaults
-# to 1/2 USDC for a thin testnet wallet; real demo uses $10 / $50 (see top of file).
-seed_pool "flu-shot"  "[doc] Get your flu shot — upload your influenza vaccination record (provider, date, lot)" 0 30 0 "$FLU_FUNDING"
-seed_pool "screening" "[doc] Biometric screening — upload your results (blood pressure, BMI, glucose)"           0 30 0 "$SCREENING_FUNDING"
+# entry 0 (free to join), 30-day period, pot-split model (1) — see the bounty
+# model rule above. Funding defaults to 1/2 USDC for a thin testnet wallet;
+# real demo uses $10 / $50 (see top of file).
+seed_pool "flu-shot"  "[doc] Get your flu shot — upload your influenza vaccination record (provider, date, lot)" 0 30 1 "$FLU_FUNDING"
+seed_pool "screening" "[doc] Biometric screening — upload your results (blood pressure, BMI, glucose)"           0 30 1 "$SCREENING_FUNDING"
 
 # 4. Sync the address into env files.
 echo "==> Syncing addresses into .env, app/.env.local, DEPLOYMENTS.md"

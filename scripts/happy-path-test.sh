@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 #
 # Happy-path proof for GoHealthMe — proves the full on-chain loop LIVE on Arc:
-#   create pool -> join (synthetic World nullifier) -> oracle records verdict ->
-#   settle -> USDC lands with the achiever.
+#   create pool -> join (synthetic nullifier, deduped on-chain) -> oracle records
+#   verdict -> settle -> USDC lands with the achiever.
 #
 # This is the one leg the Foundry tests can't cover: the oracle key signing a real
 # recordResult transaction against the DEPLOYED contract on Arc. Uses a dedicated
@@ -50,7 +50,8 @@ cast send "$POOLS" "createPool(string,string,uint256,uint64,uint64,uint8,uint256
 PID="$(cast call "$POOLS" "poolCount()(uint256)" --rpc-url "$RPC")"; PID="${PID%% *}"
 echo "   poolId = $PID"
 
-# 2. Deployer joins as participant with a synthetic World nullifier.
+# 2. Deployer joins as participant with a synthetic nullifier (joinPool
+#    dedupes it on-chain: one wallet, one entry).
 NULL="$NOW"
 echo "-> join pool $PID (nullifier $NULL)"
 cast send "$POOLS" "joinPool(uint256,uint256)" "$PID" "$NULL" --private-key "$DK" --rpc-url "$RPC" >/dev/null
