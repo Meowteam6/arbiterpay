@@ -64,6 +64,8 @@ function fakeReader(overrides: Partial<ArcReader> = {}): ArcReader {
     attesterAddress: vi.fn().mockResolvedValue(OTHER),
     participantRecorded: vi.fn().mockResolvedValue(false),
     verdictRecorded: vi.fn().mockResolvedValue(false),
+    waitForInclusion: vi.fn().mockResolvedValue(undefined),
+    settledPayout: vi.fn().mockResolvedValue(null),
     achieverPayouts: vi
       .fn()
       .mockResolvedValue([{ participant: USER, amount: 50_000_000n }]),
@@ -89,6 +91,12 @@ function fakeBuy(overrides: Record<string, unknown> = {}) {
       service: "vision-judge",
       label: "vision judge (Gemini)",
       estUsd: "0.35",
+      url: null,
+    }),
+    quoteChainRead: vi.fn().mockResolvedValue({
+      service: "chain-read",
+      label: "chain verification read (QuickNode, x402)",
+      estUsd: "0.01",
       url: null,
     }),
     buy: vi
@@ -203,7 +211,18 @@ describe("runAgentForGoal", () => {
         .createContractExecutionTransaction,
     ).not.toHaveBeenCalled();
     const settle = result.ledger.find((e) => e.kind === "settle");
-    expect(settle).toMatchObject({ status: "deferred" });
+    expect(settle).toMatchObject({
+      status: "deferred",
+      periodEndIso: "1970-01-01T00:16:40.000Z",
+    });
+    // Plain prose only - the raw epoch lives in periodEndIso, not the note.
+    expect((settle as { note: string }).note).not.toMatch(/1000/);
+    // The plan carries the pool linkage the sweep route needs.
+    expect(result.ledger[0]).toMatchObject({
+      kind: "plan",
+      poolId: "7",
+      participant: USER,
+    });
   });
 
   it("records and settles through the Circle wallet once the roles point at SPOTTER", async () => {
@@ -376,6 +395,379 @@ describe("runAgentForGoal", () => {
     expect(entry).toMatchObject({ decision: "no-pay" });
     expect((entry as { note: string }).note).toMatch(/overruled/);
     expect(deps.legacyRecordResult).not.toHaveBeenCalled();
+  });
+
+  it("re-keys a retry: a fresh attesterId buys a fresh read and gets a fresh decision", async () => {
+    const { runAgentForGoal } = await loadRun();
+    const failingPoll = vi.fn().mockResolvedValue({
+      status: "failed",
+      verdict: { verified: false, confidence: "low", reason: "unreadable" },
+    });
+    const deps = makeDeps({ poll: failingPoll });
+
+    const first = await runAgentForGoal(deps, INPUT);
+    expect(first.status).toBe("no-pay");
+
+    // The user re-submits: a new attester job, a passing verdict this time.
+    const passingPoll = vi.fn().mockResolvedValue({
+      status: "completed",
+      verdict: { verified: true, confidence: "high", reason: "flu shot on record" },
+    });
+    const retryDeps = makeDeps({ poll: passingPoll });
+    (retryDeps.spotter as { nowSeconds: () => bigint }).nowSeconds = () => 500n;
+
+    const second = await runAgentForGoal(retryDeps, {
+      ...INPUT,
+      attesterId: "job-2",
+    });
+
+    // The retry is NOT short-circuited by job-1's stale verdict and reason.
+    expect(second.status).toBe("recorded");
+    const spends = second.ledger.filter((e) => e.kind === "spend");
+    expect(spends.map((s) => s.ref)).toEqual(["job-1", "job-2"]);
+    const verdicts = second.ledger.filter((e) => e.kind === "verdict");
+    expect(verdicts.map((v) => v.ref)).toEqual(["job-1", "job-2"]);
+    const reasons = second.ledger.filter((e) => e.kind === "reason");
+    expect(reasons.map((r) => r.ref)).toEqual(["job-1", "job-2"]);
+    expect(reasons[1].decision).toBe("pay");
+  });
+
+  it("never buys a read of a fail-closed attester job, recording the skip once", async () => {
+    const { runAgentForGoal } = await loadRun();
+    const poll = vi.fn().mockResolvedValue({
+      status: "failed",
+      verdict: {
+        verified: false,
+        confidence: "low",
+        reason: "Verification could not be performed.",
+      },
+    });
+    const buy = fakeBuy();
+    const deps = makeDeps({ poll, buy });
+    const input = { ...INPUT, attesterId: "fail-abc123" };
+
+    const first = await runAgentForGoal(deps, input);
+    expect(first.status).toBe("no-pay");
+    expect(buy.buy).not.toHaveBeenCalled();
+    expect(first.ledger.filter((e) => e.kind === "spend")).toHaveLength(0);
+    const errors = first.ledger.filter(
+      (e) => e.kind === "error" && e.stage === "attester",
+    );
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as { message: string }).message).toContain("fail-abc123");
+
+    // A re-poll must not duplicate the skip record.
+    const second = await runAgentForGoal(deps, input);
+    expect(
+      second.ledger.filter((e) => e.kind === "error" && e.stage === "attester"),
+    ).toHaveLength(1);
+  });
+
+  it("buys one paid chain read to verify the settlement when the endpoint exists", async () => {
+    const { runAgentForGoal } = await loadRun();
+    const { ACHIEVER_PAID_ABI } = await import("@/lib/server/agent/spotter");
+    const { encodeEventTopics, encodeAbiParameters } = await import("viem");
+    const paidLog = {
+      address: "0xc4274eF2cBe28f77Af31b980055Cc1171818390C",
+      topics: encodeEventTopics({
+        abi: ACHIEVER_PAID_ABI,
+        eventName: "AchieverPaid",
+        args: { poolId: 7n, participant: USER },
+      }),
+      data: encodeAbiParameters([{ type: "uint256" }], [50_000_000n]),
+    };
+    const buy = fakeBuy({
+      quoteChainRead: vi.fn().mockResolvedValue({
+        service: "chain-read",
+        label: "chain verification read (QuickNode, x402)",
+        estUsd: "0.01",
+        url: "https://x402.quicknode.com/arc-testnet/",
+      }),
+      buy: vi
+        .fn()
+        .mockImplementation(
+          async (quote: { service: string; estUsd: string }) => ({
+            amountUsd: quote.estUsd,
+            settlement: quote.service === "chain-read" ? "x402" : "prepaid",
+            gatewayTx: quote.service === "chain-read" ? "gw-9" : null,
+            data:
+              quote.service === "chain-read"
+                ? {
+                    jsonrpc: "2.0",
+                    id: 1,
+                    result: { status: "0x1", logs: [paidLog] },
+                  }
+                : null,
+          }),
+        ),
+    });
+    const reader = fakeReader({
+      oracleAddress: vi.fn().mockResolvedValue(SPOTTER),
+      attesterAddress: vi.fn().mockResolvedValue(SPOTTER),
+    });
+    const deps = makeDeps({
+      buy,
+      spotter: { circle: fakeExecutor(), reader, nowSeconds: () => 2_000n },
+    });
+
+    const result = await runAgentForGoal(deps, INPUT);
+
+    expect(result.status).toBe("paid");
+    const chainSpend = result.ledger.find(
+      (e) => e.kind === "spend" && e.service === "chain-read",
+    );
+    expect(chainSpend).toMatchObject({
+      ref: "0xfeed",
+      settlement: "x402",
+      amountUsd: "0.01",
+    });
+    expect((chainSpend as { note: string }).note).toContain("gateway tx gw-9");
+    const settle = result.ledger.find(
+      (e) => e.kind === "settle" && e.status === "settled",
+    );
+    expect((settle as { note: string }).note).toMatch(
+      /independently confirmed/,
+    );
+    // The JSON-RPC body carried the settle tx, never document data.
+    const chainCall = (buy.buy as ReturnType<typeof vi.fn>).mock.calls.find(
+      (c) => (c[0] as { service: string }).service === "chain-read",
+    );
+    expect(chainCall?.[1]).toEqual({
+      jsonrpc: "2.0",
+      id: 1,
+      method: "eth_getTransactionReceipt",
+      params: ["0xfeed"],
+    });
+  });
+
+  it("falls back to the free verification path when the chain-read purchase fails", async () => {
+    const { runAgentForGoal } = await loadRun();
+    const buy = fakeBuy({
+      quoteChainRead: vi.fn().mockResolvedValue({
+        service: "chain-read",
+        label: "chain verification read (QuickNode, x402)",
+        estUsd: "0.01",
+        url: "https://x402.quicknode.com/arc-testnet/",
+      }),
+      buy: vi
+        .fn()
+        .mockImplementation(
+          async (quote: { service: string; estUsd: string }) => {
+            if (quote.service === "chain-read") {
+              throw new Error("gateway 502");
+            }
+            return {
+              amountUsd: quote.estUsd,
+              settlement: "prepaid",
+              gatewayTx: null,
+              data: null,
+            };
+          },
+        ),
+    });
+    const reader = fakeReader({
+      oracleAddress: vi.fn().mockResolvedValue(SPOTTER),
+      attesterAddress: vi.fn().mockResolvedValue(SPOTTER),
+    });
+    const deps = makeDeps({
+      buy,
+      spotter: { circle: fakeExecutor(), reader, nowSeconds: () => 2_000n },
+    });
+
+    const result = await runAgentForGoal(deps, INPUT);
+
+    // Settlement is never blocked by the verification purchase.
+    expect(result.status).toBe("paid");
+    expect(
+      result.ledger.some((e) => e.kind === "spend" && e.service === "chain-read"),
+    ).toBe(false);
+    const settle = result.ledger.find(
+      (e) => e.kind === "settle" && e.status === "settled",
+    );
+    expect((settle as { note: string }).note).toMatch(
+      /chain-read purchase failed/,
+    );
+  });
+
+  it("runs a wearable claim on the junction read with wearable provenance", async () => {
+    const { runAgentForGoal } = await loadRun();
+    const poll = vi.fn().mockResolvedValue({
+      status: "completed",
+      verdict: {
+        verified: true,
+        confidence: "high",
+        reason: "Junction reports 7 qualifying days.",
+      },
+    });
+    const buy = fakeBuy();
+    const deps = makeDeps({ poll, buy });
+    (deps.spotter as { nowSeconds: () => bigint }).nowSeconds = () => 500n;
+
+    const result = await runAgentForGoal(deps, {
+      ...INPUT,
+      attesterId: "wearable-111",
+      evidenceKind: "wearable" as const,
+      goalSpec: "sleep score 75+ for 7 days",
+    });
+
+    expect(result.status).toBe("recorded");
+    expect(buy.quoteAttesterRead).not.toHaveBeenCalled();
+    const spends = result.ledger.filter((e) => e.kind === "spend");
+    expect(spends).toHaveLength(1);
+    expect(spends[0]).toMatchObject({
+      service: "junction-read",
+      label: "wearable summary (Junction)",
+      amountUsd: "0.01",
+      ref: "wearable-111",
+      settlement: "prepaid",
+    });
+    const plan = result.ledger.find((e) => e.kind === "plan");
+    expect(plan).toMatchObject({ steps: [{ service: "junction-read" }] });
+    // Provenance: recorded as wearable-verified, never as AI-attested.
+    const verdictCall = (
+      deps.legacyRecordVerdict as ReturnType<typeof vi.fn>
+    ).mock.calls[0];
+    expect(verdictCall[5]).toBe(1);
+  });
+
+  it("re-decides a wearable claim when fresh data changes the verdict, without re-buying", async () => {
+    const { runAgentForGoal } = await loadRun();
+    const input = {
+      ...INPUT,
+      attesterId: "wearable-111",
+      evidenceKind: "wearable" as const,
+    };
+    const poll = vi.fn().mockResolvedValue({
+      status: "completed",
+      verdict: {
+        verified: false,
+        confidence: "high",
+        reason: "Junction reports 3 of 7 qualifying days.",
+      },
+    });
+    const deps = makeDeps({ poll });
+    (deps.spotter as { nowSeconds: () => bigint }).nowSeconds = () => 500n;
+
+    const first = await runAgentForGoal(deps, input);
+    expect(first.status).toBe("no-pay");
+
+    // Four days later the streak completes; same ref, fresh data.
+    poll.mockResolvedValue({
+      status: "completed",
+      verdict: {
+        verified: true,
+        confidence: "high",
+        reason: "Junction reports 7 qualifying days.",
+      },
+    });
+
+    const second = await runAgentForGoal(deps, input);
+    expect(second.status).toBe("recorded");
+    // One junction read for the whole period; two verdicts, two decisions.
+    expect(second.ledger.filter((e) => e.kind === "spend")).toHaveLength(1);
+    expect(second.ledger.filter((e) => e.kind === "verdict")).toHaveLength(2);
+    const reasons = second.ledger.filter((e) => e.kind === "reason");
+    expect(reasons.map((r) => r.decision)).toEqual(["no-pay", "pay"]);
+  });
+
+  it("reconciles an already-settled pool against AchieverPaid instead of declaring it unpayable", async () => {
+    // Multi-achiever pools settle everyone in ONE transaction: the second
+    // claim swept finds the pool already settled and must recover its own
+    // payout from the log, never stamp a false terminal failure.
+    const { settleRecordedClaim } = await loadRun();
+    const reader = fakeReader({
+      getPoolState: vi
+        .fn()
+        .mockResolvedValue({ settled: true, periodEnd: 1_000n }),
+      settledPayout: vi
+        .fn()
+        .mockResolvedValue({ txHash: "0xabc1", amount: 25_000_000n }),
+    });
+    const deps = {
+      spotter: { circle: fakeExecutor(), reader, nowSeconds: () => 2_000n },
+      buy: fakeBuy(),
+    };
+
+    const outcome = await settleRecordedClaim(deps, {
+      goalId: GOAL,
+      poolId: 7n,
+      participant: USER,
+    });
+
+    expect(outcome.status).toBe("settled");
+    expect(reader.settledPayout).toHaveBeenCalledWith(7n, USER);
+    const settle = outcome.ledger.find(
+      (e) => e.kind === "settle" && e.status === "settled",
+    );
+    expect(settle).toMatchObject({ txHash: "0xabc1", paidUsd: "25" });
+    expect(outcome.ledger.some((e) => e.kind === "error")).toBe(false);
+  });
+
+  it("declares an already-settled pool unpayable only when AchieverPaid has no payout", async () => {
+    const { settleRecordedClaim, SETTLE_UNPAYABLE_MESSAGE } = await loadRun();
+    const reader = fakeReader({
+      getPoolState: vi
+        .fn()
+        .mockResolvedValue({ settled: true, periodEnd: 1_000n }),
+      settledPayout: vi.fn().mockResolvedValue(null),
+    });
+    const deps = {
+      spotter: { circle: fakeExecutor(), reader, nowSeconds: () => 2_000n },
+      buy: fakeBuy(),
+    };
+
+    const outcome = await settleRecordedClaim(deps, {
+      goalId: GOAL,
+      poolId: 7n,
+      participant: USER,
+    });
+
+    expect(outcome.status).toBe("error");
+    const errors = outcome.ledger.filter(
+      (e) => e.kind === "error" && e.stage === "settle",
+    );
+    expect(errors).toHaveLength(1);
+    expect((errors[0] as { message: string }).message).toBe(
+      SETTLE_UNPAYABLE_MESSAGE,
+    );
+
+    // A second sweep pass must not duplicate the terminal entry.
+    const again = await settleRecordedClaim(deps, {
+      goalId: GOAL,
+      poolId: 7n,
+      participant: USER,
+    });
+    expect(
+      again.ledger.filter((e) => e.kind === "error" && e.stage === "settle"),
+    ).toHaveLength(1);
+  });
+
+  it("keeps the claim retryable when the AchieverPaid reconciliation read fails", async () => {
+    const { settleRecordedClaim, SETTLE_UNPAYABLE_MESSAGE } = await loadRun();
+    const reader = fakeReader({
+      getPoolState: vi
+        .fn()
+        .mockResolvedValue({ settled: true, periodEnd: 1_000n }),
+      settledPayout: vi.fn().mockRejectedValue(new Error("rpc down")),
+    });
+    const deps = {
+      spotter: { circle: fakeExecutor(), reader, nowSeconds: () => 2_000n },
+      buy: fakeBuy(),
+    };
+
+    const outcome = await settleRecordedClaim(deps, {
+      goalId: GOAL,
+      poolId: 7n,
+      participant: USER,
+    });
+
+    expect(outcome.status).toBe("error");
+    const error = outcome.ledger.find(
+      (e) => e.kind === "error" && e.stage === "settle",
+    ) as { message: string };
+    expect(error.message).toContain("reconciliation read failed");
+    // Not the terminal message, so the sweep filter keeps retrying it.
+    expect(error.message).not.toBe(SETTLE_UNPAYABLE_MESSAGE);
   });
 
   it("returns paid from the ledger fast path without re-running anything", async () => {

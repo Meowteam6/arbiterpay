@@ -1,10 +1,12 @@
 // SPOTTER's buy side: per-claim service purchases over x402 via Circle
 // Gateway, with an honest prepaid fallback.
 //
-// Two services exist today. The cheap read ("attester-read") covers the TEE
+// Three services quote here. The cheap read ("attester-read") covers the TEE
 // attester inference this claim consumed; the escalation ("vision-judge") is
 // the second opinion SPOTTER buys only when the cheap read comes back
-// unreadable. Service endpoints are env-driven: with X402_PRIVATE_KEY and a
+// unreadable; the settlement check ("chain-read") is one paid JSON-RPC call
+// through QuickNode's x402 gateway that independently verifies a settle
+// transaction. Service endpoints are env-driven: with X402_PRIVATE_KEY and a
 // service URL set, the purchase is a real Gateway-batched x402 payment from
 // the agent's spend key and the ledger row carries the Gateway transaction.
 // With them unset, the service is metered under an existing API key and the
@@ -30,6 +32,15 @@ export const VISION_JUDGE_SERVICE = "vision-judge";
 export const VISION_JUDGE_LABEL = "vision judge (Gemini)";
 export const VISION_JUDGE_EST_USD = "0.35";
 
+export const CHAIN_READ_SERVICE = "chain-read";
+export const CHAIN_READ_LABEL = "chain verification read (QuickNode, x402)";
+export const CHAIN_READ_EST_USD = "0.01";
+// QuickNode's live x402 offer for Arc testnet (eip155:5042002,
+// GatewayWalletBatched v1, $0.0001/request) - GatewayClient pays it as-is.
+// Only used when a spend key exists; otherwise the quote is prepaid/null and
+// the free-RPC verification path runs instead.
+const CHAIN_READ_DEFAULT_URL = "https://x402.quicknode.com/arc-testnet/";
+
 export interface ServiceQuote {
   service: string;
   label: string;
@@ -52,6 +63,7 @@ export interface PurchaseResult {
 export interface BuyDeps {
   quoteAttesterRead(): Promise<ServiceQuote>;
   quoteVisionJudge(): Promise<ServiceQuote>;
+  quoteChainRead(): Promise<ServiceQuote>;
   buy(quote: ServiceQuote, body: Record<string, unknown>): Promise<PurchaseResult>;
 }
 
@@ -102,8 +114,9 @@ async function quoteService(
   label: string,
   fallbackEstUsd: string,
   urlEnv: string,
+  defaultUrl = "",
 ): Promise<ServiceQuote> {
-  const url = optionalEnv(urlEnv, "");
+  const url = optionalEnv(urlEnv, defaultUrl);
   const gw = gateway();
   if (url === "" || gw === null) {
     return { service, label, estUsd: fallbackEstUsd, url: null };
@@ -175,6 +188,17 @@ export function liveBuyDeps(): BuyDeps {
         VISION_JUDGE_LABEL,
         VISION_JUDGE_EST_USD,
         "X402_VISION_JUDGE_URL",
+      ),
+    // Defaults to QuickNode's public Arc-testnet x402 endpoint the moment a
+    // spend key exists; without one, quoteService degrades this to prepaid
+    // and the caller must not write any chain-read spend row.
+    quoteChainRead: () =>
+      quoteService(
+        CHAIN_READ_SERVICE,
+        CHAIN_READ_LABEL,
+        CHAIN_READ_EST_USD,
+        "X402_CHAIN_READ_URL",
+        CHAIN_READ_DEFAULT_URL,
       ),
     buy: buyLive,
   };

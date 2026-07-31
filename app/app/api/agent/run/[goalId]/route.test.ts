@@ -20,7 +20,13 @@ vi.mock("@/lib/server/agent/wallet", () => ({
   getCircleClient: vi.fn(() => ({})),
 }));
 vi.mock("@/lib/server/agent/spotter", () => ({
-  arcReader: vi.fn(() => ({})),
+  arcReader: vi.fn(() => ({
+    getPoolState: vi.fn().mockResolvedValue({
+      settled: false,
+      periodStart: 123n,
+      periodEnd: 456n,
+    }),
+  })),
 }));
 vi.mock("@/lib/server/agent/x402", () => ({
   liveBuyDeps: vi.fn(() => ({})),
@@ -110,6 +116,41 @@ describe("POST /api/agent/run/[goalId]", () => {
   it("rejects an unknown evidenceKind", async () => {
     const res = await post(GOAL, { ...GOOD_BODY, evidenceKind: "vibes" });
     expect(res.status).toBe(400);
+  });
+
+  it("rejects a document claim with no attesterId at all", async () => {
+    const body: Record<string, unknown> = { ...GOOD_BODY };
+    delete body.attesterId;
+    const res = await post(GOAL, body);
+    expect(res.status).toBe(400);
+    expect(runAgentForGoal).not.toHaveBeenCalled();
+  });
+
+  it("accepts a wearable claim without attesterId and keys it to the pool period", async () => {
+    const body: Record<string, unknown> = {
+      ...GOOD_BODY,
+      evidenceKind: "wearable",
+    };
+    delete body.attesterId;
+
+    const res = await post(GOAL, body);
+
+    expect(res.status).toBe(200);
+    const input = runAgentForGoal.mock.calls[0][1] as {
+      attesterId: string;
+      evidenceKind: string;
+    };
+    // The ref is derived from the chain's periodStart, never from the caller.
+    expect(input.attesterId).toBe("wearable-123");
+    expect(input.evidenceKind).toBe("wearable");
+  });
+
+  it("rejects a wearable claim that supplies its own attesterId", async () => {
+    const res = await post(GOAL, { ...GOOD_BODY, evidenceKind: "wearable" });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/attesterId/);
+    expect(runAgentForGoal).not.toHaveBeenCalled();
   });
 });
 

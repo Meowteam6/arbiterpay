@@ -32,7 +32,15 @@ interface Stamped {
 
 export type LedgerEntry = Stamped &
   (
-    | { kind: "plan"; steps: PlannedStep[]; capUsd: string }
+    | {
+        kind: "plan";
+        steps: PlannedStep[];
+        capUsd: string;
+        /** On-chain pool linkage, written at plan time so the settlement
+         *  sweep can act on this claim from the ledger alone. */
+        poolId?: string;
+        participant?: string;
+      }
     | {
         kind: "spend";
         service: string;
@@ -50,9 +58,22 @@ export type LedgerEntry = Stamped &
         verified: boolean;
         confidence: Confidence;
         reason: string;
+        /** The attester job this verdict belongs to: the attesterId for the
+         *  primary read, `${attesterId}:vision-judge` for an escalation. A
+         *  retried claim gets a fresh attesterId, so ref is what keeps a
+         *  fresh retry from short-circuiting on a stale verdict. */
         ref: string;
       }
-    | { kind: "reason"; decision: "pay" | "no-pay"; note: string }
+    | {
+        kind: "reason";
+        decision: "pay" | "no-pay";
+        note: string;
+        /** The attesterId this decision was made against. Always set on new
+         *  writes; optional because entries predate the field. Selection is
+         *  by ref match, so a retry under a fresh attesterId re-decides
+         *  instead of replaying the stale outcome. */
+        ref?: string;
+      }
     | {
         kind: "record";
         goalId: string;
@@ -65,8 +86,12 @@ export type LedgerEntry = Stamped &
         status: "deferred" | "settled" | "already-settled";
         txHash?: string;
         paidUsd?: string;
+        /** For deferred entries: when the pool period ends, ISO-8601 UTC.
+         *  The note stays plain prose; no raw epoch seconds in it. */
+        periodEndIso?: string;
         note?: string;
       }
+    /** stage vocabulary: "buy" | "attester" | "record" | "settle". */
     | { kind: "error"; stage: string; message: string }
   );
 

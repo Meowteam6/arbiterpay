@@ -59,6 +59,7 @@ function fakeReader(overrides: Partial<ArcReader> = {}): ArcReader {
     attesterAddress: vi.fn().mockResolvedValue(USER),
     participantRecorded: vi.fn().mockResolvedValue(false),
     verdictRecorded: vi.fn().mockResolvedValue(false),
+    waitForInclusion: vi.fn().mockResolvedValue(undefined),
     achieverPayouts: vi
       .fn()
       .mockResolvedValue([{ participant: USER, amount: 50_000_000n }]),
@@ -221,7 +222,43 @@ describe("recordResultAsSpotter", () => {
       abiParameters: ["7", USER, true, 12_500],
       fee: { type: "level", config: { feeLevel: "MEDIUM" } },
     });
+    expect(executor.getTransaction).toHaveBeenCalledWith(
+      expect.objectContaining({ id: "cx-1", waitForState: "CONFIRMED" }),
+    );
     expect(result).toEqual({ status: "recorded", txHash: "0xfeed" });
+  });
+
+  it("waits for inclusion on the reading RPC before reporting recorded", async () => {
+    stubSpotterEnv();
+    const reader = fakeReader();
+
+    const result = await recordResultAsSpotter(deps(fakeExecutor(), reader), {
+      poolId: POOL,
+      user: USER,
+      verdict: true,
+      multiplierBps: 10_000,
+    });
+
+    expect(reader.waitForInclusion).toHaveBeenCalledWith("0xfeed");
+    expect(result).toEqual({ status: "recorded", txHash: "0xfeed" });
+  });
+
+  it("propagates a reverted result write instead of reporting recorded", async () => {
+    stubSpotterEnv();
+    const reader = fakeReader({
+      waitForInclusion: vi
+        .fn()
+        .mockRejectedValue(new Error("tx 0xfeed reverted on Arc testnet")),
+    });
+
+    await expect(
+      recordResultAsSpotter(deps(fakeExecutor(), reader), {
+        poolId: POOL,
+        user: USER,
+        verdict: true,
+        multiplierBps: 10_000,
+      }),
+    ).rejects.toThrow(/reverted/);
   });
 });
 
@@ -275,5 +312,40 @@ describe("recordVerdictAsSpotter", () => {
     expect(call.abiParameters[2]).toBe(2);
     expect(call.abiParameters[4]).toBe(6);
     expect(result).toEqual({ status: "recorded", txHash: "0xfeed" });
+  });
+
+  it("waits for registry inclusion before reporting recorded - the canSettle gate", async () => {
+    stubSpotterEnv();
+    const reader = fakeReader();
+
+    const result = await recordVerdictAsSpotter(deps(fakeExecutor(), reader), {
+      goalId: GOAL,
+      verified: true,
+      confidence: "high",
+      attesterRef: "job-1",
+      facets: 6,
+    });
+
+    expect(reader.waitForInclusion).toHaveBeenCalledWith("0xfeed");
+    expect(result).toEqual({ status: "recorded", txHash: "0xfeed" });
+  });
+
+  it("propagates a reverted registry write instead of reporting recorded", async () => {
+    stubSpotterEnv();
+    const reader = fakeReader({
+      waitForInclusion: vi
+        .fn()
+        .mockRejectedValue(new Error("tx 0xfeed reverted on Arc testnet")),
+    });
+
+    await expect(
+      recordVerdictAsSpotter(deps(fakeExecutor(), reader), {
+        goalId: GOAL,
+        verified: true,
+        confidence: "high",
+        attesterRef: "job-1",
+        facets: 6,
+      }),
+    ).rejects.toThrow(/reverted/);
   });
 });
