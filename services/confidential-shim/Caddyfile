@@ -1,0 +1,7 @@
+# TLS for the shim. SHIM_DOMAIN is an sslip.io name that resolves to the VM's
+# static IP (e.g. 34-10-20-30.sslip.io), so Caddy can pass the ACME HTTP
+# challenge and mint a real certificate with no DNS records.
+
+{$SHIM_DOMAIN} {
+	reverse_proxy shim:8080
+}
