@@ -35,8 +35,8 @@ export function unlinkAuthRoutes(): UnlinkAuthRouteHandlers {
     // Permissive authenticator: returns an empty session object.
     // Access is implicitly scoped by appId + engine environment.
     authenticate: async (_request: Request) => ({}),
-    // Allow any registered address — this demo gates access via World ID at
-    // the payout layer, not at the token-issuance layer.
+    // Allow any registered address — this demo gates access on on-chain pool
+    // membership at the payout layer, not at the token-issuance layer.
     authorizeUnlinkAddress: async (_params) => true,
     onRegister: async (_params) => {
       // Optional: persist the app-user → Unlink-address mapping here.

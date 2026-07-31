@@ -5,14 +5,14 @@
 // Reads Junction (health-data) progress for the address, derives the verdict
 // (streak >= goalDays) and multiplier (base 10000, +2500 comeback bonus
 // when the preceding week averaged under 60, capped at 30000), refuses
-// addresses without a verified World ID record for the pool, and submits
+// addresses that never joined the pool on-chain, and submits
 // recordResult to HealthPools on Arc testnet.
-// Returns: { txHash, verdict, multiplierBps, streakDays, nullifierHash }
+// Returns: { txHash, verdict, multiplierBps, streakDays }
 
 import { timingSafeEqual } from "crypto";
 import { isAddress, type Address, type Hex } from "viem";
 import { getProgress, isConnected } from "@/lib/server/junction";
-import { getVerification } from "@/lib/server/world";
+import { participantJoined } from "@/lib/server/pools";
 import { deriveMultiplierBps, recordResult } from "@/lib/server/oracle";
 import { recordVerdict, VERDICT_FACETS } from "@/lib/server/verdict";
 import { requireEnv } from "@/lib/server/env";
@@ -56,12 +56,13 @@ export async function POST(request: Request) {
       return jsonError(400, "threshold must be an integer in 1..100");
     }
 
-    // Sybil gate: only humans verified for this pool get results recorded.
-    const verification = await getVerification(address, String(poolId));
-    if (verification === null) {
+    // Entry gate: only addresses that joined the pool on-chain get results
+    // recorded. joinPool enforces one wallet, one entry.
+    const joined = await participantJoined(BigInt(poolId), address as Address);
+    if (!joined) {
       return jsonError(
         403,
-        `No verified World ID record for ${address} in pool ${String(poolId)}. Verify via /api/world/verify first.`,
+        `${address} has not joined pool ${String(poolId)} on-chain. Join the pool first.`,
       );
     }
 
@@ -139,7 +140,6 @@ export async function POST(request: Request) {
       verdict,
       multiplierBps: Number(multiplierBps),
       streakDays: progress.streakDays,
-      nullifierHash: verification.nullifierHash,
     });
   } catch (err) {
     return jsonError(500, errorMessage(err));

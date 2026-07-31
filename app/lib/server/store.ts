@@ -1,10 +1,11 @@
-// Small JSON key/value persistence used by the claims and World-ID stores.
+// Small JSON key/value persistence used by the claims store and the agent
+// ledger.
 //
 // PRODUCTION (serverless): uses Upstash Redis over its REST API — a shared,
 // persistent store reachable from every function instance. This is required
 // because serverless invocations don't share a filesystem: a record written
-// by /api/world/verify on one instance was invisible to /api/unlink/payout on
-// another, so the payout's verification gate always 403'd in prod.
+// on one instance is invisible to a route handled by another, so any
+// cross-request state kept in files always breaks in prod.
 //
 // LOCAL / TESTS (no Redis env): falls back to JSON files under os.tmpdir()
 // (or DATA_DIR). A single long-lived process shares one dir, so the file

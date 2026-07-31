@@ -40,9 +40,11 @@ const HEALTH_VERDICT_ABI = [
   },
 ] as const;
 
-// Facet bits mirror HealthVerdict.sol FACET_* constants.
+// Facet bits mirror HealthVerdict.sol FACET_* constants. Bit1 (World ID) is
+// intentionally never set: entry is one wallet, one entry, enforced by the
+// pool contract, and no proof-of-humanity check runs anymore. Writing the bit
+// would be a false provenance claim.
 const FACET_WEARABLE = 1 << 0; // bit0: wearable/device data verified
-const FACET_WORLD_ID = 1 << 1; // bit1: World ID confirmed
 const FACET_AI_ATTESTED = 1 << 2; // bit2: AI attested (TEE inference)
 
 /**
@@ -53,9 +55,9 @@ const FACET_AI_ATTESTED = 1 << 2; // bit2: AI attested (TEE inference)
  */
 export const VERDICT_FACETS = {
   /** Document judged by the Confidential AI attester (TEE inference). */
-  document: FACET_WORLD_ID | FACET_AI_ATTESTED,
+  document: FACET_AI_ATTESTED,
   /** Wearable streak checked against Junction provider data. No AI involved. */
-  wearable: FACET_WORLD_ID | FACET_WEARABLE,
+  wearable: FACET_WEARABLE,
 } as const;
 
 const CONFIDENCE_U8: Record<Confidence, number> = { low: 0, medium: 1, high: 2 };

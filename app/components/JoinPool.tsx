@@ -1,15 +1,9 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import {
-  IDKitRequestWidget,
-  proofOfHuman,
-  type IDKitResult,
-  type RpContext,
-} from "@worldcoin/idkit";
 import { useQueryClient } from "@tanstack/react-query";
 import { arcTxUrl } from "@/lib/chains";
-import { DYNAMIC_CONFIGURED, WORLD_ACTION_ID, WORLD_APP_ID } from "@/lib/config";
+import { DYNAMIC_CONFIGURED } from "@/lib/config";
 import { useEmbeddedWallet } from "@/lib/wallet";
 import {
   erc20Abi,
@@ -22,43 +16,9 @@ import { ErrorNote } from "@/components/ui";
 
 type JoinStatus =
   | { kind: "idle" }
-  | { kind: "preparing" }
-  | { kind: "awaiting-proof" }
-  | { kind: "verifying" }
   | { kind: "joining" }
   | { kind: "joined"; txHash: string | null }
   | { kind: "error"; message: string };
-
-interface VerifyResponse {
-  ok?: boolean;
-  nullifierHash?: string;
-  error?: string;
-}
-
-function parseRpContext(payload: unknown): RpContext | null {
-  if (typeof payload !== "object" || payload === null) return null;
-  const record = payload as Record<string, unknown>;
-  const candidate =
-    (record.rp_context as Record<string, unknown> | undefined) ??
-    (record.rpContext as Record<string, unknown> | undefined) ??
-    record;
-  if (
-    typeof candidate.rp_id === "string" &&
-    typeof candidate.nonce === "string" &&
-    typeof candidate.signature === "string" &&
-    typeof candidate.created_at === "number" &&
-    typeof candidate.expires_at === "number"
-  ) {
-    return {
-      rp_id: candidate.rp_id,
-      nonce: candidate.nonce,
-      created_at: candidate.created_at,
-      expires_at: candidate.expires_at,
-      signature: candidate.signature,
-    };
-  }
-  return null;
-}
 
 function JoinPoolInner({
   poolId,
@@ -85,86 +45,21 @@ function JoinPoolInner({
       setStatus((s) => (s.kind === "idle" ? { kind: "joined", txHash: null } : s));
     }
   }, [alreadyJoined]);
-  const [rpContext, setRpContext] = useState<RpContext | null>(null);
-  const [widgetOpen, setWidgetOpen] = useState(false);
-
-  if (WORLD_APP_ID === null) {
-    return (
-      <ErrorNote
-        title="World ID is not configured"
-        detail="Set NEXT_PUBLIC_WORLD_APP_ID (must start with app_) to enable verified joining."
-      />
-    );
-  }
 
   const startJoin = async () => {
-    setStatus({ kind: "preparing" });
+    if (address === null) return;
+    setStatus({ kind: "joining" });
     try {
-      const res = await fetch(`/api/world/rp-context?poolId=${poolId}`, {
-        method: "GET",
-      });
-      if (!res.ok) {
-        throw new Error(
-          `Verification service responded ${res.status}. The /api/world/rp-context route may not be live yet.`,
-        );
-      }
-      const context = parseRpContext(await res.json());
-      if (context === null) {
-        throw new Error(
-          "Verification service returned an unexpected payload for the World ID request context.",
-        );
-      }
-      setRpContext(context);
-      setWidgetOpen(true);
-      setStatus({ kind: "awaiting-proof" });
-    } catch (err) {
-      setStatus({
-        kind: "error",
-        message: err instanceof Error ? err.message : "Failed to start World ID verification.",
-      });
-    }
-  };
-
-  const submitProof = async (result: IDKitResult) => {
-    setWidgetOpen(false);
-    setStatus({ kind: "verifying" });
-    try {
-      const res = await fetch("/api/world/verify", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          proof: result,
-          poolId: poolId.toString(),
-          address,
-        }),
-      });
-      const body = (await res.json().catch(() => ({}))) as VerifyResponse;
-      if (!res.ok || body.ok !== true) {
-        throw new Error(
-          body.error ?? `Verification failed with status ${res.status}.`,
-        );
-      }
-      if (
-        typeof body.nullifierHash !== "string" ||
-        body.nullifierHash.length === 0
-      ) {
-        throw new Error(
-          "Verification succeeded but returned no nullifier hash.",
-        );
-      }
-
-      // The proof is verified off-chain; now record the join on-chain. Without
-      // this transaction the address is NOT a pool participant, so the oracle
-      // cannot post a result and settle never pays out. The "joined" state is
-      // only reached after this tx confirms.
-      setStatus({ kind: "joining" });
       const poolsAddress = getHealthPoolsAddress();
       if (poolsAddress === null) {
         throw new Error(
           "HealthPools contract address is not configured. Set NEXT_PUBLIC_HEALTH_POOLS_ADDRESS.",
         );
       }
-      const nullifier = BigInt(body.nullifierHash);
+      // joinPool's second parameter is a dedupe value the contract stores and
+      // rejects on reuse (ALREADY_JOINED). The wallet address IS the entry
+      // identity, so it is the value: one wallet, one entry, enforced on-chain.
+      const nullifier = BigInt(address);
       const walletClient = await getArcWalletClient();
       const publicClient = getArcPublicClient();
 
@@ -197,8 +92,7 @@ function JoinPoolInner({
     } catch (err) {
       setStatus({
         kind: "error",
-        message:
-          err instanceof Error ? err.message : "Verification request failed.",
+        message: err instanceof Error ? err.message : "Joining the pool failed.",
       });
     }
   };
@@ -207,7 +101,7 @@ function JoinPoolInner({
     return (
       <div className="rounded-xl border border-accent/40 bg-accent-deep/40 p-4">
         <p className="text-base font-semibold text-accent">
-          You are in. One verified human, one entry.
+          You are in. One wallet, one entry.
         </p>
         {status.txHash !== null ? (
           <a
@@ -223,11 +117,7 @@ function JoinPoolInner({
     );
   }
 
-  const busy =
-    status.kind === "preparing" ||
-    status.kind === "awaiting-proof" ||
-    status.kind === "verifying" ||
-    status.kind === "joining";
+  const busy = status.kind === "joining";
 
   return (
     <div className="space-y-3">
@@ -243,55 +133,20 @@ function JoinPoolInner({
         }}
         className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
       >
-        {status.kind === "preparing"
-          ? "Preparing verification..."
-          : status.kind === "awaiting-proof"
-            ? "Waiting for World ID..."
-            : status.kind === "verifying"
-              ? "Verifying proof..."
-              : status.kind === "joining"
-                ? "Joining on-chain..."
-                : authenticated
-                  ? "Join with World ID"
-                  : "Sign in to join"}
+        {status.kind === "joining"
+          ? "Joining on-chain..."
+          : authenticated
+            ? "I'm in"
+            : "Sign in to join"}
       </button>
       <p className="text-xs text-muted">
-        Joining requires a one-time World ID proof of humanity. Your health
-        data never goes on-chain, only verified outcomes do.
+        One wallet, one entry. No sign-ups, no extra apps.
       </p>
       {status.kind === "error" ? (
         <ErrorNote
           title="Could not join the pool"
           detail={status.message}
           onRetry={() => setStatus({ kind: "idle" })}
-        />
-      ) : null}
-      {rpContext !== null ? (
-        <IDKitRequestWidget
-          open={widgetOpen}
-          onOpenChange={(open) => {
-            setWidgetOpen(open);
-            if (!open && status.kind === "awaiting-proof") {
-              setStatus({ kind: "idle" });
-            }
-          }}
-          app_id={WORLD_APP_ID}
-          action={`${WORLD_ACTION_ID}-${poolId}`}
-          rp_context={rpContext}
-          allow_legacy_proofs={true}
-          preset={proofOfHuman(
-            address !== null ? { signal: address } : undefined,
-          )}
-          onSuccess={(result) => {
-            void submitProof(result);
-          }}
-          onError={(code) => {
-            setWidgetOpen(false);
-            setStatus({
-              kind: "error",
-              message: `World ID verification did not complete (${code}).`,
-            });
-          }}
         />
       ) : null}
     </div>
