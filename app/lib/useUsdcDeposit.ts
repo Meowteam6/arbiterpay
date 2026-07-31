@@ -9,6 +9,7 @@ import {
   healthPoolsAbi,
   USDC_ADDRESS,
 } from "@/lib/contract";
+import { humanizeTxError } from "@/lib/tx-errors";
 import { useEmbeddedWallet } from "@/lib/wallet";
 
 /**
@@ -46,7 +47,10 @@ export type DepositStatus =
   | { kind: "depositing" }
   // approveHash is null when a prior (max) approval was reused — no approve tx.
   | { kind: "done"; approveHash: Hash | null; depositHash: Hash }
-  | { kind: "error"; message: string };
+  // message is the one-line human detail; raw carries the untouched wallet
+  // error text for a collapsed technical-details view (empty when the error
+  // originated here rather than in a wallet or contract call).
+  | { kind: "error"; message: string; raw?: string };
 
 export interface UseUsdcDepositResult {
   status: DepositStatus;
@@ -126,10 +130,12 @@ export function useUsdcDeposit(): UseUsdcDepositResult {
         setStatus({ kind: "done", approveHash, depositHash });
         return depositHash;
       } catch (err) {
-        const message =
-          err instanceof Error ? err.message : "USDC deposit failed.";
-        setStatus({ kind: "error", message });
-        throw err instanceof Error ? err : new Error(message);
+        // Never surface viem's multi-line dump as the message. Consumers
+        // render status.message in an ErrorNote; the raw text rides along
+        // separately for a collapsed technical-details view.
+        const human = humanizeTxError(err);
+        setStatus({ kind: "error", message: human.detail, raw: human.raw });
+        throw err instanceof Error ? err : new Error(human.detail);
       }
     },
     [getArcWalletClient],
