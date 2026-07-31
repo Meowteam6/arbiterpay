@@ -14,12 +14,12 @@ Built at ETHGlobal New York 2026 by Andre Chuabio + Nikki Hu.
 
 Sponsor-funded USDC reward pools for verified health goals. A sponsor (insurer, employer, brand)
 funds a pool with published bounties ("sleep score >= 75 for 3 nights = $X"); a participant joins
-(one human, one entry, via World ID), their wearable/health data is verified, and USDC settles
-instantly to achievers. Optional layers: stake on your own streak for a multiplier, or back someone
-else's goal. The pitch: the UnitedHealthcare rewards model, but instant, transparent, and sybil-proof.
+(one wallet, one entry, enforced on-chain by joinPool), their wearable/health data is verified, and
+USDC settles instantly to achievers. Optional layers: stake on your own streak for a multiplier, or
+back someone else's goal. The pitch: the UnitedHealthcare rewards model, but instant and transparent.
 
-Why crypto: programmable escrow that pays the instant a verified behavior happens, a rewards pool no
-one can sybil-farm (World ID), and portable health reputation. Insurers already pay for this through
+Why crypto: programmable escrow that pays the instant a verified behavior happens, a rewards pool
+with on-chain entry dedupe, and portable health reputation. Insurers already pay for this through
 opaque points and slow gift cards; we make it trustless and instant.
 
 ## Submitted partner picks (the 3-pick cap)
@@ -30,9 +30,9 @@ submitted. The submit decision is final at the Sunday form.
 
 ## Repo layout
 
-- `contracts/` — Foundry. `src/HealthPools.sol` (pools, joinPool w/ World ID nullifier, recordResult,
-  settle, backGoal, multipliers) and `src/HealthVerdict.sol` (Chainlink verdict registry + onReport
-  receiver). Tests in `test/`. `scripts/Deploy.s.sol`.
+- `contracts/` — Foundry. `src/HealthPools.sol` (pools, joinPool w/ on-chain nullifier dedupe,
+  recordResult, settle, backGoal, multipliers) and `src/HealthVerdict.sol` (Chainlink verdict
+  registry + onReport receiver). Tests in `test/`. `scripts/Deploy.s.sol`.
 - `app/` — Next.js App Router (TypeScript, Tailwind). Frontend + API routes. THIS is the Next project
   root — env loads from `app/.env.local`, NOT the repo-root `.env` (see "Env").
 - `cre/` — Chainlink CRE goal-verification workflow (Confidential AI Attester callback pattern).
@@ -63,19 +63,19 @@ submitted. The submit decision is final at the Sunday form.
 The Next app reads env from `app/.env.local` (its project root is `app/`), NOT the repo-root `.env`.
 The repo-root `.env` is used by the shell scripts (deploy, happy-path, demo-reset). When you add a
 secret, put app-needed vars in `app/.env.local`. Both files are gitignored. NEXT_PUBLIC_* vars must be
-in `app/.env.local` to reach the browser (e.g. the World ID widget needs NEXT_PUBLIC_WORLD_APP_ID /
-NEXT_PUBLIC_WORLD_ACTION_ID, which are aliases of the server WORLD_APP_ID / WORLD_ACTION_ID).
+in `app/.env.local` to reach the browser (e.g. NEXT_PUBLIC_DYNAMIC_ENVIRONMENT_ID for sign-in, or
+NEXT_PUBLIC_HEALTH_POOLS_ADDRESS, the browser alias of the server HEALTH_POOLS_ADDRESS).
 
-Currently set: Privy (NEXT_PUBLIC_PRIVY_APP_ID, PRIVY_APP_SECRET), World ID (WORLD_APP_ID,
-WORLD_ACTION_ID + NEXT_PUBLIC aliases), Arc/oracle (ORACLE_SIGNER_PRIVATE_KEY, HEALTH_POOLS_ADDRESS,
-ARC_RPC_URL, ORACLE_API_SECRET), Chainlink attester (CONFIDENTIAL_AI_API_KEY), CRE (CRE_ETH_PRIVATE_KEY,
-CRE_TARGET=staging-settings). MISSING: WHOOP_CLIENT_ID / WHOOP_CLIENT_SECRET (Nikki's).
+Currently set: Arc/oracle (ORACLE_SIGNER_PRIVATE_KEY, HEALTH_POOLS_ADDRESS, ARC_RPC_URL,
+ORACLE_API_SECRET), Chainlink attester (CONFIDENTIAL_AI_API_KEY), CRE (CRE_ETH_PRIVATE_KEY,
+CRE_TARGET=staging-settings). The hackathon-era Privy and World ID vars are gone (Circle build).
+MISSING: WHOOP_CLIENT_ID / WHOOP_CLIENT_SECRET (Nikki's).
 
 ## Architecture (data flow)
 
-Next.js (frontend + API routes) with Privy embedded wallets ->
-- World ID proof verified in `app/api/world/verify` -> nullifier stored per-pool in `joinPool` (one
-  human, one entry; product is sybil-farmed without it = World Track B).
+Next.js (frontend + API routes) with embedded wallets (Dynamic; originally Privy) ->
+- Entry: one wallet, one entry — `joinPool`'s on-chain nullifier dedupe (the World ID verify route
+  of the ETHGlobal build was removed in the Circle build; see the note at the top).
 - WHOOP OAuth (`app/api/whoop/*`) -> derived health summary -> verdict.
 - Verdict path A (today's demo): `app/lib/server/oracle.ts` server signs `recordResult` to HealthPools.
 - Verdict path B (Chainlink): `cre/` workflow receives a Confidential AI Attester callback (TEE
@@ -340,9 +340,9 @@ so `claims.ts` and `world.ts` were untouched.
 - Provisioned via the **Vercel "Upstash for Redis"** Marketplace integration → injects
   `KV_REST_API_URL` + `KV_REST_API_TOKEN` (also `KV_URL`, `REDIS_URL`) into all envs. The code accepts
   `KV_REST_API_*` or `UPSTASH_REDIS_REST_*`. It's one shared DB across Prod/Preview/Dev.
-- Records written before this change (to the old ephemeral store) are gone. For an already-joined pool
-  whose World-ID proof can't be re-issued (one proof per pool), seed the record directly:
-  `redis.set("gohealthme:world-verifications.json", { "<lowercase addr>": { "<poolId>": { nullifierHash, poolId, verifiedAt } } })`.
+- Records written before this change (to the old ephemeral store) are gone. (The World-ID record
+  store itself is gone in the Circle build — server gates now read pool membership from the contract,
+  so there is nothing to seed. The old seed command is dropped from this doc; do not recreate the key.)
 
 ## MetaMask "message signature denied" (4001) — usually a STALE PROD BUILD, not a regression
 The sign-in fix is `useMetamaskSdk: false` + `initialAuthenticationMode: "connect-only"` in

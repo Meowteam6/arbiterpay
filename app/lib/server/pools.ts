@@ -1,11 +1,19 @@
-// On-chain participant reads for HealthPools (server only).
+// On-chain participant and verdict reads for HealthPools (server only).
 //
 // The entry gate is the contract itself: joinPool enforces one wallet, one
 // entry (ALREADY_JOINED), so the participant's joined flag IS the record of
 // who may receive results and payouts for a pool. Server routes gate on this
-// read rather than any off-chain identity store.
+// read rather than any off-chain identity store. Payout routes additionally
+// gate on the HealthVerdict registry (verdictCanSettle) — membership alone is
+// not an achievement.
 
-import { createPublicClient, defineChain, http, type Address } from "viem";
+import {
+  createPublicClient,
+  defineChain,
+  http,
+  type Address,
+  type Hex,
+} from "viem";
 import { optionalEnv, requireEnv } from "@/lib/server/env";
 
 const HEALTH_POOLS_PARTICIPANT_ABI = [
@@ -64,4 +72,42 @@ export async function participantJoined(
     args: [poolId, user],
   });
   return participant.joined;
+}
+
+// canSettle is HealthVerdict's settlement predicate: recorded AND verified
+// AND confidence above LOW. Deliberately NOT the bare `recorded` mapping —
+// that flips true for a rejected (verified=false) verdict too, via
+// recordVerdict, onReport, or overrideVerdict, and would wave a rejected
+// claim through a payout gate.
+const HEALTH_VERDICT_CAN_SETTLE_ABI = [
+  {
+    type: "function",
+    name: "canSettle",
+    stateMutability: "view",
+    inputs: [{ name: "goalId", type: "bytes32" }],
+    outputs: [{ name: "", type: "bool" }],
+  },
+] as const;
+
+/**
+ * True when the HealthVerdict registry holds a PASSING verdict for this goal
+ * — the exact predicate HealthPools.settle() gates payment on.
+ *
+ * Requires HEALTH_VERDICT_ADDRESS: on the money path a missing registry
+ * address must fail loudly (requireEnv throws), never silently wave a payout
+ * through. scripts/demo-reset.sh keeps the env var in lockstep with the
+ * on-chain settlement gate.
+ */
+export async function verdictCanSettle(goalId: Hex): Promise<boolean> {
+  const registry = requireEnv("HEALTH_VERDICT_ADDRESS") as Address;
+  const publicClient = createPublicClient({
+    chain: arcTestnet(),
+    transport: http(),
+  });
+  return publicClient.readContract({
+    address: registry,
+    abi: HEALTH_VERDICT_CAN_SETTLE_ABI,
+    functionName: "canSettle",
+    args: [goalId],
+  });
 }

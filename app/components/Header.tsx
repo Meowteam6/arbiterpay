@@ -31,7 +31,7 @@ function NavLinks() {
             key={item.href}
             href={item.href}
             aria-current={active ? "page" : undefined}
-            className={`rounded-lg px-3 py-2 ${
+            className={`whitespace-nowrap rounded-lg px-2.5 py-2 sm:px-3 ${
               active
                 ? "bg-surface-raised text-foreground"
                 : "text-muted hover:bg-surface-raised hover:text-foreground"
@@ -94,14 +94,25 @@ function AuthControls() {
 }
 
 export default function Header() {
+  // Mobile (375px) cannot fit wordmark + 4 links + auth on one row. The nav
+  // links live in their own horizontally scrollable strip (only the nav
+  // scrolls, never the page); wordmark and auth stay pinned at the edges.
+  // AgentStrip is already hidden below sm.
   return (
     <header className="sticky top-0 z-40 border-b border-edge bg-background/90 backdrop-blur">
-      <div className="mx-auto flex h-16 max-w-5xl items-center justify-between gap-3 px-4">
-        <Link href="/" className="text-lg font-bold tracking-tight">
+      <div className="mx-auto flex h-16 max-w-5xl items-center gap-2 px-3 sm:gap-3 sm:px-4">
+        <Link
+          href="/"
+          className="shrink-0 text-base font-bold tracking-tight sm:text-lg"
+        >
           Go<span className="text-accent">Health</span>Me
         </Link>
-        <nav className="flex items-center gap-1 text-sm font-medium sm:gap-2">
-          <NavLinks />
+        <nav className="min-w-0 flex-1 overflow-x-auto [scrollbar-width:none] [&::-webkit-scrollbar]:hidden">
+          <div className="flex w-max items-center gap-1 text-sm font-medium sm:ml-auto sm:gap-2">
+            <NavLinks />
+          </div>
+        </nav>
+        <div className="flex shrink-0 items-center gap-1 sm:gap-2">
           <AgentStrip />
           {DYNAMIC_CONFIGURED ? (
             <AuthControls />
@@ -110,7 +121,7 @@ export default function Header() {
               Sign-in unavailable
             </span>
           )}
-        </nav>
+        </div>
       </div>
     </header>
   );

@@ -5,7 +5,8 @@
 // health document (flu-shot record, lab/cholesterol report, biometric screening);
 // we submit it to the Chainlink Confidential AI Attester for confidential
 // inference inside a TEE. Inference is asynchronous, so this route returns the
-// attester job id immediately; the frontend then polls /api/evidence/result.
+// attester job id immediately; the frontend then drives SPOTTER's run loop by
+// polling POST /api/agent/run/<goalId> with it.
 //
 // Request JSON:
 //   { poolId: number|string, address: string, goalSpec: string,
@@ -15,7 +16,7 @@
 // Response JSON:
 //   { attesterId: string }
 //   On a missing key or attester error the id is a "fail-<random>" id, which the
-//   result route resolves to an UNVERIFIED verdict that is never recorded — a
+//   agent's poll step resolves to an UNVERIFIED verdict that is never recorded — a
 //   broken or unconfigured attester can never mint a passing result. Only with
 //   DEMO_MODE explicitly on is a "mock-<random>" id returned instead, which does
 //   resolve to a verified verdict (local demos only).

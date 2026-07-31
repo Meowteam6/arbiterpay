@@ -11,6 +11,7 @@ import {
   type WalletClient,
 } from "viem";
 import { arcTestnet } from "@/lib/chains";
+import { DYNAMIC_CONFIGURED } from "@/lib/config";
 
 export type ArcWalletClient = WalletClient<Transport, Chain, Account>;
 
@@ -24,6 +25,31 @@ export interface EmbeddedWalletState {
 }
 
 /**
+ * Inert wallet state for builds with no Dynamic environment id. Providers
+ * renders the app WITHOUT DynamicContextProvider in that case, so Dynamic
+ * hooks would throw; components that call useEmbeddedWallet unguarded
+ * (PoolDetail) still need a safe answer: signed out, no address.
+ */
+function useStubWallet(): EmbeddedWalletState {
+  return {
+    ready: true,
+    authenticated: false,
+    address: null,
+    login: () => {
+      console.warn(
+        "Dynamic is not configured (NEXT_PUBLIC_DYNAMIC_ENVIRONMENT_ID unset); sign-in is unavailable.",
+      );
+    },
+    logout: async () => {},
+    getArcWalletClient: async () => {
+      throw new Error(
+        "Dynamic is not configured. Set NEXT_PUBLIC_DYNAMIC_ENVIRONMENT_ID to enable wallets.",
+      );
+    },
+  };
+}
+
+/**
  * Dynamic-backed wallet access. Prefers the primary wallet, switches it to
  * Arc testnet, and returns a viem wallet client.
  *
@@ -32,7 +58,7 @@ export interface EmbeddedWalletState {
  * are untouched. The `wallet` field from the old interface was confirmed
  * unused by consumers (grep -rn ".wallet" app/components app/lib returned 0 hits).
  */
-export function useEmbeddedWallet(): EmbeddedWalletState {
+function useDynamicWallet(): EmbeddedWalletState {
   const { sdkHasLoaded, primaryWallet, setShowAuthFlow, handleLogOut } =
     useDynamicContext();
   const isLoggedIn = useIsLoggedIn();
@@ -62,3 +88,9 @@ export function useEmbeddedWallet(): EmbeddedWalletState {
     getArcWalletClient,
   };
 }
+
+// Selected once at module load: DYNAMIC_CONFIGURED is a build-time constant,
+// so the hook identity never changes at runtime and the rules of hooks hold.
+export const useEmbeddedWallet: () => EmbeddedWalletState = DYNAMIC_CONFIGURED
+  ? useDynamicWallet
+  : useStubWallet;

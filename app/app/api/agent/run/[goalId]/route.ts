@@ -2,10 +2,10 @@
 // GET  /api/agent/run/[goalId] - read the claim's ledger (AgentReceipt data).
 //
 // The browser polls POST after submitting evidence; each poll resumes the run
-// wherever it stopped (the ledger carries the state). Unauthenticated like
-// /api/evidence/result and safe for the same reasons: every step is
-// idempotent, spends are deduped by attester job and capped per claim, and
-// the on-chain writes are gated by the attester verdict, not by the caller.
+// wherever it stopped (the ledger carries the state). Unauthenticated by
+// design and safe because every step is idempotent, spends are deduped by
+// attester job and capped per claim, and the on-chain writes are gated by the
+// attester verdict, not by the caller.
 //
 // The path goalId MUST equal the on-chain computeGoalId(poolId, address) -
 // otherwise one claim's evidence could be run under another claim's ledger.
