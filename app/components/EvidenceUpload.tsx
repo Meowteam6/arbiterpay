@@ -2,14 +2,21 @@
 
 import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
-import { arcTxUrl } from "@/lib/chains";
 import { DYNAMIC_CONFIGURED } from "@/lib/config";
-import { displayGoalSpec } from "@/lib/contract";
+import { displayGoalSpec, fetchGoalId } from "@/lib/contract";
 import { useEmbeddedWallet } from "@/lib/wallet";
+import {
+  failureModeOf,
+  toUsd2,
+  type LedgerEntry,
+  type RunStatus,
+} from "@/lib/agent-receipt";
+import AgentReceipt from "@/components/AgentReceipt";
+import PayoutMoment from "@/components/PayoutMoment";
 import { ErrorNote } from "@/components/ui";
 
-// text/plain is included so the demo sample records in public/demo-evidence/
-// (.txt) can be uploaded directly.
+// text/plain stays accepted so old sample records keep working, but it is
+// deliberately not advertised anywhere: a .txt on camera reads as fake.
 const ACCEPTED_TYPES = [
   "image/png",
   "image/jpeg",
@@ -19,65 +26,38 @@ const ACCEPTED_TYPES = [
 const ACCEPT_ATTR = ACCEPTED_TYPES.join(",");
 const MAX_FILE_BYTES = 8 * 1024 * 1024; // 8 MB keeps the base64 POST venue-WiFi friendly.
 
-// Poll cadence for /api/evidence/result. The attester is fast (often one ~3s
-// poll), but we cap the attempts so a stuck job surfaces an error instead of
-// spinning forever. 20 tries * 2.5s ≈ 50s ceiling.
-const POLL_INTERVAL_MS = 2_500;
-const MAX_POLLS = 20;
+// Poll cadence for the agent run. Each poll resumes SPOTTER's run loop where
+// it stopped, so a tight interval makes the receipt rows land as they happen.
+// 75 tries * 800ms = one minute before a stuck run surfaces as an error.
+const POLL_INTERVAL_MS = 800;
+const MAX_POLLS = 75;
 
-type Confidence = "low" | "medium" | "high";
+/** Run statuses that end the polling loop. "recorded" also stops it: the pool
+ *  period has not ended, and SPOTTER settles the moment it does. */
+const TERMINAL: RunStatus[] = [
+  "paid",
+  "no-pay",
+  "cap-exceeded",
+  "blocked",
+  "recorded",
+  "error",
+];
 
 interface SubmitResponse {
   attesterId?: string;
   error?: string;
 }
 
-interface ResultResponse {
-  status?: "verifying" | "completed" | "failed";
-  verified?: boolean;
-  confidence?: Confidence;
-  reason?: string;
-  recorded?: boolean;
-  txHash?: string;
+interface RunResponse {
+  status?: RunStatus;
+  ledger?: LedgerEntry[];
   error?: string;
 }
 
-// Lab-result style timeline steps. `active` is the current in-flight step.
-type TimelineStep =
-  | "uploaded"
-  | "verifying"
-  | "verdict"
-  | "settling"
-  | "paid";
-
-const TIMELINE_ORDER: TimelineStep[] = [
-  "uploaded",
-  "verifying",
-  "verdict",
-  "settling",
-  "paid",
-];
-
-const TIMELINE_LABELS: Record<TimelineStep, string> = {
-  uploaded: "Uploaded",
-  verifying: "Verifying privately in a secure enclave (TEE)",
-  verdict: "Verdict received",
-  settling: "Settling on Arc",
-  paid: "Paid",
-};
-
 type UploadStatus =
   | { kind: "idle" }
-  | { kind: "progress"; step: TimelineStep }
-  | {
-      kind: "result";
-      verified: boolean;
-      confidence: Confidence;
-      reason: string;
-      recorded: boolean;
-      txHash: string | null;
-      error: string | null;
-    }
+  | { kind: "submitting" }
+  | { kind: "agent"; runStatus: RunStatus; ledger: LedgerEntry[] }
   | { kind: "error"; message: string };
 
 interface SelectedFile {
@@ -85,12 +65,6 @@ interface SelectedFile {
   contentType: string;
   base64: string;
 }
-
-const CONFIDENCE_LABELS: Record<Confidence, string> = {
-  low: "Low confidence",
-  medium: "Medium confidence",
-  high: "High confidence",
-};
 
 /** Read a File into a bare base64 string (no data: prefix) in the browser. */
 function readFileAsBase64(file: File): Promise<string> {
@@ -127,43 +101,6 @@ function normalizeContentType(file: File): string {
   return file.type;
 }
 
-function StatusTimeline({ active }: { active: TimelineStep }) {
-  const activeIndex = TIMELINE_ORDER.indexOf(active);
-  return (
-    <ol className="space-y-2">
-      {TIMELINE_ORDER.map((step, index) => {
-        const done = index < activeIndex;
-        const current = index === activeIndex;
-        return (
-          <li key={step} className="flex items-center gap-3">
-            <span
-              className={
-                done
-                  ? "flex h-5 w-5 items-center justify-center rounded-full bg-accent text-[11px] font-bold text-background"
-                  : current
-                    ? "h-5 w-5 animate-pulse rounded-full border-2 border-accent bg-accent-deep"
-                    : "h-5 w-5 rounded-full border-2 border-edge"
-              }
-              aria-hidden
-            >
-              {done ? "✓" : ""}
-            </span>
-            <span
-              className={
-                done || current
-                  ? "text-sm font-medium text-foreground"
-                  : "text-sm text-muted"
-              }
-            >
-              {TIMELINE_LABELS[step]}
-            </span>
-          </li>
-        );
-      })}
-    </ol>
-  );
-}
-
 function EvidenceUploadInner({
   poolId,
   goalSpec,
@@ -190,7 +127,7 @@ function EvidenceUploadInner({
     const contentType = normalizeContentType(file);
     if (!(ACCEPTED_TYPES as readonly string[]).includes(contentType)) {
       setSelected(null);
-      setFormError("Upload a PNG, JPG, PDF, or TXT record.");
+      setFormError("Upload a PNG, JPG, or PDF record.");
       return;
     }
     if (file.size > MAX_FILE_BYTES) {
@@ -212,8 +149,10 @@ function EvidenceUploadInner({
   const submit = async () => {
     if (selected === null || address === null) return;
 
-    // Step 1 — submit the document to the attester and get a job id.
-    setStatus({ kind: "progress", step: "uploaded" });
+    // Step 1 — submit the document to the attester and get a job id. Only
+    // this request ever carries the document; everything after it works on
+    // the derived verdict.
+    setStatus({ kind: "submitting" });
     let attesterId: string;
     try {
       const res = await fetch("/api/evidence/submit", {
@@ -251,14 +190,29 @@ function EvidenceUploadInner({
       return;
     }
 
-    // Step 2 — poll for the verdict.
-    setStatus({ kind: "progress", step: "verifying" });
-    for (let attempt = 0; attempt < MAX_POLLS; attempt++) {
-      await sleep(POLL_INTERVAL_MS);
+    // Step 2 — the claim's ledger is keyed by the on-chain goal id, so read
+    // it from the contract; the run route re-derives and enforces the match.
+    let goalId: string;
+    try {
+      goalId = await fetchGoalId(poolId, address);
+    } catch (err) {
+      setStatus({
+        kind: "error",
+        message:
+          err instanceof Error
+            ? err.message
+            : "Could not derive the goal id from the contract.",
+      });
+      return;
+    }
 
-      let body: ResultResponse;
+    // Step 3 — drive SPOTTER's run loop. Every poll resumes it where it
+    // stopped and returns the full ledger; the receipt renders it verbatim.
+    let last: RunStatus = "verifying";
+    for (let attempt = 0; attempt < MAX_POLLS; attempt++) {
+      let body: RunResponse;
       try {
-        const res = await fetch("/api/evidence/result", {
+        const res = await fetch(`/api/agent/run/${goalId}`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
@@ -268,63 +222,38 @@ function EvidenceUploadInner({
             goalSpec,
           }),
         });
-        body = (await res.json().catch(() => ({}))) as ResultResponse;
+        body = (await res.json().catch(() => ({}))) as RunResponse;
         if (!res.ok) {
-          throw new Error(
-            body.error ?? `Verification service responded ${res.status}.`,
-          );
+          throw new Error(body.error ?? `SPOTTER responded ${res.status}.`);
         }
       } catch (err) {
         setStatus({
           kind: "error",
           message:
-            err instanceof Error
-              ? err.message
-              : "Verification request failed.",
+            err instanceof Error ? err.message : "The agent run failed.",
         });
         return;
       }
 
-      if (body.status === "verifying") {
-        // keep the verifying step visible; loop again.
-        continue;
+      if (body.status === undefined || body.ledger === undefined) {
+        setStatus({
+          kind: "error",
+          message: "SPOTTER returned an unexpected response.",
+        });
+        return;
       }
 
-      // completed or failed — settle the UI.
-      const verified = body.verified === true;
-      const recorded = body.recorded === true;
+      last = body.status;
+      setStatus({ kind: "agent", runStatus: last, ledger: body.ledger });
 
-      if (verified && recorded) {
-        // Briefly show the "settling / paid" steps for the clinical feel.
-        setStatus({ kind: "progress", step: "settling" });
-        await sleep(600);
-        setStatus({ kind: "progress", step: "paid" });
-        await sleep(400);
-      } else if (verified) {
-        // verified but not recorded (e.g. join-first) — surface the verdict step.
-        setStatus({ kind: "progress", step: "verdict" });
-        await sleep(300);
+      if (TERMINAL.includes(last)) {
+        if (last === "paid" || last === "recorded") {
+          await queryClient.invalidateQueries({ queryKey: ["pool"] });
+          await queryClient.invalidateQueries({ queryKey: ["participant"] });
+        }
+        return;
       }
-
-      setStatus({
-        kind: "result",
-        verified,
-        confidence: body.confidence ?? "low",
-        reason:
-          body.reason ??
-          (verified
-            ? "Document accepted."
-            : "Document could not be verified."),
-        recorded,
-        txHash: typeof body.txHash === "string" ? body.txHash : null,
-        error: typeof body.error === "string" ? body.error : null,
-      });
-
-      if (verified) {
-        await queryClient.invalidateQueries({ queryKey: ["pool"] });
-        await queryClient.invalidateQueries({ queryKey: ["participant"] });
-      }
-      return;
+      await sleep(POLL_INTERVAL_MS);
     }
 
     // Exhausted polls without a terminal status.
@@ -342,86 +271,138 @@ function EvidenceUploadInner({
     if (inputRef.current !== null) inputRef.current.value = "";
   };
 
-  const busy = status.kind === "progress";
+  const busy = status.kind === "submitting" || status.kind === "agent";
 
-  // In-flight: show the lab-result style status timeline.
-  if (status.kind === "progress") {
+  if (status.kind === "submitting") {
+    return (
+      <div className="space-y-3">
+        <h3 className="text-lg font-semibold">Handing it to SPOTTER</h3>
+        <p className="text-sm text-muted">
+          Your document is going into the confidential enclave. Only the
+          verdict comes back out.
+        </p>
+      </div>
+    );
+  }
+
+  if (status.kind === "agent") {
+    const failureMode =
+      status.runStatus === "no-pay" ? failureModeOf(status.ledger) : null;
+    const paid = status.ledger.find(
+      (e) => e.kind === "settle" && e.status === "settled",
+    );
+
     return (
       <div className="space-y-4">
-        <h3 className="text-lg font-semibold">Verifying your record</h3>
-        <p className="text-sm text-muted">
-          Your document is being checked privately inside a confidential AI
-          enclave (TEE). Nothing leaves the enclave; only the verdict is recorded
-          on-chain.
-        </p>
-        <div className="rounded-xl border border-accent/30 bg-accent-deep/10 p-4">
-          <StatusTimeline active={status.step} />
-        </div>
-      </div>
-    );
-  }
+        {status.runStatus === "paid" &&
+        paid !== undefined &&
+        paid.kind === "settle" &&
+        paid.paidUsd !== undefined ? (
+          <PayoutMoment
+            paidUsd={toUsd2(paid.paidUsd)}
+            txHash={paid.txHash ?? null}
+          />
+        ) : null}
 
-  // Verified + recorded result: green payout card.
-  if (status.kind === "result" && status.verified && status.recorded) {
-    return (
-      <div className="space-y-3">
-        <div className="rounded-xl border border-accent/40 bg-accent-deep/40 p-4">
-          <p className="text-base font-semibold text-accent">
-            Record verified. Your bounty is on its way.
+        <AgentReceipt ledger={status.ledger} />
+
+        {status.runStatus === "verifying" ? (
+          <p className="text-sm text-muted">
+            SPOTTER is working. Rows print as they happen.
           </p>
-          <p className="mt-1 text-sm text-foreground/80">{status.reason}</p>
-          <p className="mt-2 text-xs uppercase tracking-wide text-muted">
-            {CONFIDENCE_LABELS[status.confidence]} · Verified privately in a TEE
+        ) : null}
+
+        {status.runStatus === "recorded" ? (
+          <p className="text-sm text-muted">
+            Verified and recorded on-chain. SPOTTER settles the payout the
+            moment the pool period ends — no human involved.
           </p>
-          {status.txHash !== null ? (
-            <a
-              href={arcTxUrl(status.txHash)}
-              target="_blank"
-              rel="noopener noreferrer"
-              className="mt-2 inline-block break-all text-sm text-accent underline"
+        ) : null}
+
+        {failureMode === "evidence" ? (
+          <div className="space-y-3">
+            <div className="rounded-xl border border-warning/40 bg-warning/10 p-4">
+              <p className="text-base font-semibold text-warning">
+                SPOTTER could not read that
+              </p>
+              <p className="mt-1 text-sm text-foreground/80">
+                It spent real money trying. The photo is the problem, not you —
+                shoot it again in actual light and run it back.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={resetUpload}
+              className="w-full rounded-xl border border-accent/50 bg-surface-raised px-5 py-3 text-sm font-semibold text-accent hover:bg-accent-deep"
             >
-              View payout transaction on Arcscan
-            </a>
-          ) : null}
-        </div>
-      </div>
-    );
-  }
+              Upload a different file
+            </button>
+          </div>
+        ) : null}
 
-  // Verified but not recorded (e.g. has not joined the pool yet).
-  if (status.kind === "result" && status.verified && !status.recorded) {
-    return (
-      <div className="space-y-3">
-        <div className="rounded-xl border border-warning/40 bg-warning/10 p-4">
-          <p className="text-base font-semibold text-warning">
-            Document verified, but not yet recorded
-          </p>
-          <p className="mt-1 text-sm text-foreground/80">
-            {status.error ??
-              "Join the pool first, then re-submit your evidence to claim the bounty."}
-          </p>
-          <p className="mt-2 text-xs uppercase tracking-wide text-muted">
-            {CONFIDENCE_LABELS[status.confidence]} · Verified privately in a TEE
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={resetUpload}
-          className="w-full rounded-xl border border-accent/50 bg-surface-raised px-5 py-3 text-sm font-semibold text-accent hover:bg-accent-deep"
-        >
-          Try again
-        </button>
+        {failureMode === "goal-missed" ? (
+          <div className="rounded-xl border border-edge bg-surface-raised p-4">
+            <p className="text-base font-semibold">Not paid.</p>
+            <p className="mt-1 text-sm text-foreground/80">
+              The document was read fine. It does not show the goal being met.
+            </p>
+          </div>
+        ) : null}
+
+        {status.runStatus === "cap-exceeded" ? (
+          <div className="rounded-xl border border-warning/40 bg-warning/10 p-4">
+            <p className="text-base font-semibold text-warning">
+              SPOTTER hit its spending cap and stopped
+            </p>
+            <p className="mt-1 text-sm text-foreground/80">
+              Every claim runs under a hard per-claim budget. This one reached
+              it before a verdict landed, so no more money moves.
+            </p>
+          </div>
+        ) : null}
+
+        {status.runStatus === "blocked" ? (
+          <div className="space-y-3">
+            <div className="rounded-xl border border-warning/40 bg-warning/10 p-4">
+              <p className="text-base font-semibold text-warning">
+                Join the pool first
+              </p>
+              <p className="mt-1 text-sm text-foreground/80">
+                This wallet is not a participant in the pool on-chain, so
+                nothing can be recorded for it. Join the pool, then submit
+                again.
+              </p>
+            </div>
+            <button
+              type="button"
+              onClick={resetUpload}
+              className="w-full rounded-xl border border-accent/50 bg-surface-raised px-5 py-3 text-sm font-semibold text-accent hover:bg-accent-deep"
+            >
+              Try again
+            </button>
+          </div>
+        ) : null}
+
+        {status.runStatus === "error" ? (
+          <ErrorNote
+            title="The run hit an error"
+            detail="The receipt above shows exactly where it stopped. Nothing was paid that the ledger does not show."
+            onRetry={() => setStatus({ kind: "idle" })}
+          />
+        ) : null}
       </div>
     );
   }
 
   return (
     <div className="space-y-3">
-      <h3 className="text-lg font-semibold">Submit your record</h3>
+      <h3 className="text-lg font-semibold">Prove it.</h3>
       <p className="text-sm text-muted">
-        Upload proof for {readableGoal === "" ? "this goal" : `"${readableGoal}"`}.
-        It is checked privately inside a confidential AI enclave (TEE) and the
-        bounty pays out the moment it verifies. Accepts PNG, JPG, PDF, or TXT.
+        {readableGoal === ""
+          ? "Scale photo, gym selfie, lab PDF, screenshot of your watch at 2am."
+          : `Proof for "${readableGoal}": scale photo, gym selfie, lab PDF, screenshot of your watch at 2am.`}{" "}
+        SPOTTER works out what it is looking at and buys what it needs. Messy
+        is fine. Fake is not.
       </p>
 
       <input
@@ -441,10 +422,10 @@ function EvidenceUploadInner({
       >
         {selected !== null
           ? `Selected: ${selected.name}`
-          : "Tap to choose a file (PNG, JPG, PDF, or TXT)"}
+          : "Tap to choose a file (PNG, JPG, or PDF)"}
       </button>
 
-      {selected !== null && status.kind !== "result" ? (
+      {selected !== null ? (
         <button
           type="button"
           disabled={!ready || busy}
@@ -469,27 +450,6 @@ function EvidenceUploadInner({
           detail={formError}
           onRetry={() => setFormError(null)}
         />
-      ) : null}
-
-      {status.kind === "result" && !status.verified ? (
-        <div className="space-y-3">
-          <div className="rounded-xl border border-warning/40 bg-warning/10 p-4">
-            <p className="text-base font-semibold text-warning">
-              We could not verify this record
-            </p>
-            <p className="mt-1 text-sm text-foreground/80">{status.reason}</p>
-            <p className="mt-2 text-xs uppercase tracking-wide text-muted">
-              {CONFIDENCE_LABELS[status.confidence]}
-            </p>
-          </div>
-          <button
-            type="button"
-            onClick={resetUpload}
-            className="w-full rounded-xl border border-accent/50 bg-surface-raised px-5 py-3 text-sm font-semibold text-accent hover:bg-accent-deep"
-          >
-            Upload a different file
-          </button>
-        </div>
       ) : null}
 
       {status.kind === "error" ? (
