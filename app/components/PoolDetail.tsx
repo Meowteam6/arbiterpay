@@ -1,14 +1,14 @@
 "use client";
 
 import { useQuery } from "@tanstack/react-query";
-import { useMemo } from "react";
+import { useMemo, useState } from "react";
 import Link from "next/link";
 import Countdown from "@/components/Countdown";
 import JoinPool from "@/components/JoinPool";
 import BackGoal from "@/components/BackGoal";
-import ClaimPrivately from "@/components/ClaimPrivately";
 import FundPool from "@/components/FundPool";
 import EvidenceUpload from "@/components/EvidenceUpload";
+import WearableCheck from "@/components/WearableCheck";
 import { Badge, ErrorNote, Skeleton, Stat } from "@/components/ui";
 import { arcAddressUrl } from "@/lib/chains";
 import {
@@ -21,6 +21,7 @@ import {
   formatUsdc,
   shortAddress,
 } from "@/lib/contract";
+import { poolPhase } from "@/lib/pool-lifecycle";
 import { useEmbeddedWallet } from "@/lib/wallet";
 
 function formatDay(seconds: bigint): string {
@@ -32,6 +33,13 @@ function formatDay(seconds: bigint): string {
 
 export default function PoolDetail({ id }: { id: string }) {
   const { address } = useEmbeddedWallet();
+  // Wearable pools offer two proof paths, but only one may be mounted at a
+  // time: WearableCheck and EvidenceUpload both drive SPOTTER's run loop for
+  // the same goal id, and two concurrent pollers with conflicting evidence
+  // kinds is an untested surface on a money path.
+  const [proofPath, setProofPath] = useState<"wearable" | "document">(
+    "wearable",
+  );
   const poolId = useMemo(() => {
     try {
       const parsed = BigInt(id);
@@ -41,13 +49,22 @@ export default function PoolDetail({ id }: { id: string }) {
     }
   }, [id]);
 
+  // The clock is read alongside the fetch, not during render, so the phase
+  // decision stays pure. The query client disables focus refetches, so a
+  // polling interval re-classifies the pool while the page sits open - a
+  // live pool crossing its period end must drop the join UI, not offer a
+  // button that reverts with PERIOD_ENDED.
   const poolQuery = useQuery({
     queryKey: ["pool", id],
-    queryFn: () => {
+    queryFn: async () => {
       if (poolId === null) throw new Error("Invalid pool id.");
-      return fetchPool(poolId);
+      return {
+        pool: await fetchPool(poolId),
+        asOfSeconds: BigInt(Math.floor(Date.now() / 1000)),
+      };
     },
     enabled: poolId !== null,
+    refetchInterval: 30_000,
   });
 
   const participantsQuery = useQuery({
@@ -109,12 +126,56 @@ export default function PoolDetail({ id }: { id: string }) {
     );
   }
 
-  const pool = poolQuery.data;
+  const { pool, asOfSeconds } = poolQuery.data;
   const participantCount = participantsQuery.data?.length ?? null;
   const evidenceType = evidenceTypeOf(pool.goalSpec);
   const isDocGoal = evidenceType === "document";
   const goalTitle = displayGoalSpec(pool.goalSpec);
   const hasJoined = participantQuery.data?.joined === true;
+  // joinPool and backGoal revert with PERIOD_ENDED once the period closes,
+  // so an expired pool must never offer either action. Evidence and the
+  // receipt stay visible for joined participants until settlement runs.
+  const phase = poolPhase(pool, asOfSeconds);
+
+  // The single mounted claim surface. Wearable pools default to the wearable
+  // check with the document upload one tap away; document pools upload only.
+  const claimSection = !hasJoined ? null : (
+    <>
+      {evidenceType === "wearable" ? (
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => setProofPath("wearable")}
+            className={`rounded-xl border px-4 py-2 text-sm font-medium ${
+              proofPath === "wearable"
+                ? "border-accent/50 bg-accent-deep text-accent"
+                : "border-edge bg-surface-raised text-muted hover:text-foreground"
+            }`}
+          >
+            Verify from wearable
+          </button>
+          <button
+            type="button"
+            onClick={() => setProofPath("document")}
+            className={`rounded-xl border px-4 py-2 text-sm font-medium ${
+              proofPath === "document"
+                ? "border-accent/50 bg-accent-deep text-accent"
+                : "border-edge bg-surface-raised text-muted hover:text-foreground"
+            }`}
+          >
+            Upload proof instead
+          </button>
+        </div>
+      ) : null}
+      <section className="rounded-2xl border border-accent/40 bg-surface p-5">
+        {evidenceType === "wearable" && proofPath === "wearable" ? (
+          <WearableCheck poolId={pool.id} goalSpec={pool.goalSpec} />
+        ) : (
+          <EvidenceUpload poolId={pool.id} goalSpec={pool.goalSpec} />
+        )}
+      </section>
+    </>
+  );
 
   return (
     <div className="space-y-8">
@@ -130,10 +191,12 @@ export default function PoolDetail({ id }: { id: string }) {
           <Badge tone={isDocGoal ? "accent" : "muted"}>
             {isDocGoal ? "Document" : "Wearable"}
           </Badge>
-          {pool.settled ? (
+          {phase === "settled" ? (
             <Badge tone="muted">Settled</Badge>
+          ) : phase === "expired" ? (
+            <Badge tone="warning">Expired</Badge>
           ) : (
-            <Badge tone="warning">Live</Badge>
+            <Badge tone="accent">Live</Badge>
           )}
         </div>
         {isDocGoal ? (
@@ -186,7 +249,7 @@ export default function PoolDetail({ id }: { id: string }) {
         <Stat label="Ends" value={formatDay(pool.periodEnd)} />
       </div>
 
-      {!pool.settled ? (
+      {phase === "live" ? (
         <div className="space-y-4">
           <p className="text-xs font-semibold uppercase tracking-wide text-muted">
             Participant actions
@@ -210,18 +273,30 @@ export default function PoolDetail({ id }: { id: string }) {
             />
           </section>
 
-          {hasJoined ? (
-            <section className="rounded-2xl border border-accent/40 bg-surface p-5">
-              <EvidenceUpload poolId={pool.id} goalSpec={pool.goalSpec} />
-            </section>
-          ) : null}
+          {claimSection}
 
           <section className="rounded-2xl border border-edge bg-surface p-5">
             <BackGoal poolId={pool.id} />
           </section>
+        </div>
+      ) : phase === "expired" ? (
+        <div className="space-y-4">
+          <section className="rounded-2xl border border-edge bg-surface p-5">
+            <h2 className="text-lg font-semibold">This pool has ended</h2>
+            <p className="mt-1 text-sm text-muted">
+              The goal window closed on {formatDay(pool.periodEnd)}, so joining
+              and backing are closed. SPOTTER settles the payouts for verified
+              achievers now that the period is over.
+            </p>
+          </section>
 
           {hasJoined ? (
-            <ClaimPrivately poolId={String(pool.id)} />
+            <>
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+                Your claim
+              </p>
+              {claimSection}
+            </>
           ) : null}
         </div>
       ) : (
@@ -234,14 +309,16 @@ export default function PoolDetail({ id }: { id: string }) {
         </section>
       )}
 
-      <div className="space-y-4">
-        <p className="text-xs font-semibold uppercase tracking-wide text-muted">
-          Sponsor action
-        </p>
-        <section className="rounded-2xl border border-edge bg-surface p-5">
-          <FundPool poolId={pool.id} />
-        </section>
-      </div>
+      {phase !== "settled" ? (
+        <div className="space-y-4">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+            Sponsor action
+          </p>
+          <section className="rounded-2xl border border-edge bg-surface p-5">
+            <FundPool poolId={pool.id} />
+          </section>
+        </div>
+      ) : null}
     </div>
   );
 }

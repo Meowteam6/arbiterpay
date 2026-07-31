@@ -1,11 +1,18 @@
 "use client";
 
+// The signed-in home. Joined pools lead - for a fresh account that means the
+// Browse-pools empty state is the first thing on screen, not a zero balance.
+// The streak card renders only when wearable data can exist, and the balance
+// card sits below the goal content because funding is secondary to progress.
+
 import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import BalanceCard from "@/components/BalanceCard";
 import Countdown from "@/components/Countdown";
 import { Badge, EmptyState, ErrorNote, Skeleton } from "@/components/ui";
 import {
+  displayGoalSpec,
+  evidenceTypeOf,
   fetchParticipant,
   fetchPools,
   formatUsdc,
@@ -290,6 +297,21 @@ export default function DashboardContent() {
     enabled: address !== null,
   });
 
+  // The streak card only makes sense when wearable data can exist: either a
+  // provider is already linked or the user has skin in a wearable pool. For
+  // everyone else (document goals, fresh accounts) it is noise. The key
+  // matches StreakCard's no-pool query exactly so the cache serves both
+  // instead of fetching the same endpoint twice per dashboard load.
+  const connectionQuery = useQuery({
+    queryKey: ["junction-progress", address, "none"],
+    queryFn: () => {
+      if (address === null) throw new Error("No wallet address.");
+      return fetchHealthProgress(address);
+    },
+    enabled: address !== null,
+    retry: false,
+  });
+
   if (!ready) {
     return (
       <div className="space-y-4">
@@ -317,12 +339,15 @@ export default function DashboardContent() {
     );
   }
 
+  const wearableConnected =
+    connectionQuery.data?.kind === "ok" &&
+    connectionQuery.data.progress.connected;
+  const wearablePool = (joinedQuery.data ?? []).find(
+    ({ pool }) => evidenceTypeOf(pool.goalSpec) === "wearable",
+  )?.pool;
+
   return (
     <div className="space-y-6">
-      <BalanceCard address={address} />
-      <StreakCard address={address} pool={joinedQuery.data?.[0]?.pool} />
-      <RecentDataCard address={address} />
-
       <section className="space-y-4">
         <h2 className="text-lg font-semibold">Joined pools</h2>
         {joinedQuery.isLoading ? (
@@ -369,7 +394,7 @@ export default function DashboardContent() {
                   <Badge tone={result.tone}>{result.text}</Badge>
                 </div>
                 <h3 className="mt-3 text-lg font-semibold leading-snug">
-                  {pool.goalSpec}
+                  {displayGoalSpec(pool.goalSpec)}
                 </h3>
                 <div className="mt-2 flex flex-wrap gap-x-6 gap-y-1 text-sm text-muted">
                   <span>
@@ -394,6 +419,12 @@ export default function DashboardContent() {
           })
         )}
       </section>
+
+      {wearableConnected || wearablePool !== undefined ? (
+        <StreakCard address={address} pool={wearablePool} />
+      ) : null}
+      <RecentDataCard address={address} />
+      <BalanceCard address={address} />
     </div>
   );
 }

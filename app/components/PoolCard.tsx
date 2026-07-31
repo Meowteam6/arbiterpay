@@ -9,8 +9,17 @@ import {
   shortAddress,
   type PoolInfo,
 } from "@/lib/contract";
+import { type PoolPhase } from "@/lib/pool-lifecycle";
 
-export default function PoolCard({ pool }: { pool: PoolInfo }) {
+// phase is passed by the pool list so one clock snapshot orders and labels
+// every card consistently - the card never reads the clock itself.
+export default function PoolCard({
+  pool,
+  phase,
+}: {
+  pool: PoolInfo;
+  phase: PoolPhase;
+}) {
   const isDocGoal = evidenceTypeOf(pool.goalSpec) === "document";
   return (
     <Link
@@ -24,7 +33,11 @@ export default function PoolCard({ pool }: { pool: PoolInfo }) {
             {isDocGoal ? "Document" : "Wearable"}
           </Badge>
         </div>
-        {pool.settled ? <Badge tone="muted">Settled</Badge> : null}
+        {phase === "settled" ? (
+          <Badge tone="muted">Settled</Badge>
+        ) : phase === "expired" ? (
+          <Badge tone="warning">Expired</Badge>
+        ) : null}
       </div>
       {isDocGoal ? (
         <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-accent">

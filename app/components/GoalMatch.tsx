@@ -19,7 +19,27 @@ interface Match {
   score: number;
 }
 
+// The match API returns base-unit strings; a cached or partial response must
+// degrade to an omitted row, never to a BigInt throw that takes down the page.
+function safeUsdc(raw: unknown): string | null {
+  return typeof raw === "string" && /^\d+$/.test(raw)
+    ? formatUsdc(BigInt(raw))
+    : null;
+}
+
+function formatDeadline(periodEnd: unknown): string | null {
+  const seconds = typeof periodEnd === "string" ? Number(periodEnd) : NaN;
+  if (!Number.isFinite(seconds) || seconds <= 0) return null;
+  return new Date(seconds * 1000).toLocaleDateString("en-US", {
+    month: "short",
+    day: "numeric",
+  });
+}
+
 function MatchCard({ match, lead }: { match: Match; lead: boolean }) {
+  const balanceUsd = safeUsdc(match.balance);
+  const entryFeeUsd = safeUsdc(match.entryFee);
+  const deadline = formatDeadline(match.periodEnd);
   return (
     <Link
       href={`/pools/${match.poolId}`}
@@ -34,10 +54,21 @@ function MatchCard({ match, lead }: { match: Match; lead: boolean }) {
       <p className="mt-3 text-base font-semibold">
         {displayGoalSpec(match.goalSpec)}
       </p>
-      <p className="mt-2 text-sm text-muted">
-        <Money usd={formatUsdc(BigInt(match.balance))} size="sm" /> staked by a
-        sponsor. Not you.
-      </p>
+      {balanceUsd !== null ? (
+        <p className="mt-2 text-sm text-muted">
+          <Money usd={balanceUsd} size="sm" /> staked by a sponsor. Not you.
+        </p>
+      ) : null}
+      {entryFeeUsd !== null || deadline !== null ? (
+        <div className="mt-2 flex flex-wrap gap-x-5 gap-y-1 text-sm text-muted">
+          {entryFeeUsd !== null ? (
+            <span>
+              Entry fee <Money usd={entryFeeUsd} size="sm" />
+            </span>
+          ) : null}
+          {deadline !== null ? <span>Ends {deadline}</span> : null}
+        </div>
+      ) : null}
     </Link>
   );
 }
