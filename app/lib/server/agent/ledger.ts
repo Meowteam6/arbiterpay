@@ -82,6 +82,31 @@ function ledgerFile(goalId: string): string {
   return `agent-ledger-${goalId.toLowerCase()}.json`;
 }
 
+// The store is key/value with no scan, so the /agent feed needs its own
+// index: one entry per claim, written when the claim's plan lands (the plan
+// is every claim's first entry, so one index write per claim, ever).
+const LEDGER_INDEX_FILE = "agent-ledger-index.json";
+
+export interface LedgerIndexEntry {
+  goalId: string;
+  at: string;
+}
+
+/** Claims SPOTTER has touched, most recent first. */
+export async function listLedgerGoalIds(
+  limit = 20,
+): Promise<LedgerIndexEntry[]> {
+  const index = await readJson<LedgerIndexEntry[]>(LEDGER_INDEX_FILE, []);
+  return index.slice(0, limit);
+}
+
+async function indexGoal(goalId: string, at: string): Promise<void> {
+  const index = await readJson<LedgerIndexEntry[]>(LEDGER_INDEX_FILE, []);
+  const key = goalId.toLowerCase();
+  if (index.some((entry) => entry.goalId === key)) return;
+  await writeJson(LEDGER_INDEX_FILE, [{ goalId: key, at }, ...index]);
+}
+
 /** Whole-cent USD amounts only; anything else is a bug upstream. */
 function usdToCents(amount: string, context: string): number {
   if (!/^\d+\.\d{2}$/.test(amount)) {
@@ -184,5 +209,8 @@ export async function appendLedger(
   const stamped = { ...entry, at: new Date().toISOString() } as LedgerEntry;
   const next = [...entries, stamped];
   await writeJson(ledgerFile(goalId), next);
+  if (stamped.kind === "plan") {
+    await indexGoal(goalId, stamped.at);
+  }
   return next;
 }

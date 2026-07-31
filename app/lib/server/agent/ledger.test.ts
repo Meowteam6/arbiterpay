@@ -115,4 +115,30 @@ describe("agent ledger", () => {
     await appendLedger(GOAL, plan());
     expect(await readLedger(otherGoal)).toHaveLength(0);
   });
+
+  it("indexes each claim once, on its plan entry, newest first", async () => {
+    const { appendLedger, listLedgerGoalIds } = await loadLedger();
+    const otherGoal = "0x" + "cd".repeat(32);
+
+    expect(await listLedgerGoalIds()).toHaveLength(0);
+
+    await appendLedger(GOAL, plan());
+    await appendLedger(GOAL, spend("0.02"));
+    await appendLedger(otherGoal, plan());
+
+    const index = await listLedgerGoalIds();
+    expect(index.map((e) => e.goalId)).toEqual([
+      otherGoal.toLowerCase(),
+      GOAL.toLowerCase(),
+    ]);
+    expect(index[0].at).toBeTruthy();
+  });
+
+  it("caps the feed listing at the requested limit", async () => {
+    const { appendLedger, listLedgerGoalIds } = await loadLedger();
+    for (let i = 0; i < 4; i++) {
+      await appendLedger(`0x${String(i).repeat(64)}`, plan());
+    }
+    expect(await listLedgerGoalIds(2)).toHaveLength(2);
+  });
 });
