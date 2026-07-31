@@ -2,16 +2,16 @@
 
 // The /agent page: Circle's mandatory proof 3 as a product page. Identity
 // card first - the wallet address in mono at display size, the live balance,
-// and the block-explorer link - then the feed of claims SPOTTER has touched,
-// straight from the same ledger the per-claim receipt renders.
+// and the block-explorer link - then the feed of claims SPOTTER has touched.
+// The feed is public and deliberately redacted server-side: money facts,
+// statuses, and tx hashes only, never the model's prose about anyone's
+// medical documents.
 
 import { useQuery } from "@tanstack/react-query";
 import { arcTxUrl } from "@/lib/chains";
-import {
-  projectReceipt,
-  toUsd2,
-  type LedgerEntry,
-} from "@/lib/agent-receipt";
+import { toUsd2 } from "@/lib/agent-receipt";
+import type { PublicFeedClaim } from "@/lib/server/agent/feed-view";
+import { settleMomentLine } from "@/components/AgentReceipt";
 import { EmptyState, Money, Skeleton } from "@/components/ui";
 
 interface WalletResponse {
@@ -22,25 +22,18 @@ interface WalletResponse {
   error?: string;
 }
 
-interface FeedClaim {
-  goalId: string;
-  at: string;
-  ledger: LedgerEntry[];
-}
-
 function shortGoal(goalId: string): string {
   return `${goalId.slice(0, 10)}…${goalId.slice(-6)}`;
 }
 
-function ClaimCard({ claim }: { claim: FeedClaim }) {
-  const receipt = projectReceipt(claim.ledger);
-  const reason = receipt.rows.find((r) => r.kind === "reason");
-  const settle = receipt.rows.find(
-    (r) => r.kind === "settle" && r.status === "settled",
-  );
-  const spends = receipt.rows.filter(
-    (r) => r.kind === "spend" && r.paidUsd !== null,
-  );
+function ClaimCard({ claim }: { claim: PublicFeedClaim }) {
+  const settle = claim.settle;
+  const deferredLine =
+    settle !== null &&
+    settle.status === "deferred" &&
+    settle.periodEndIso !== null
+      ? settleMomentLine(new Date(settle.periodEndIso))
+      : null;
 
   return (
     <li className="rounded-xl border border-edge bg-surface-raised p-4">
@@ -53,39 +46,37 @@ function ClaimCard({ claim }: { claim: FeedClaim }) {
         </span>
       </div>
       <div className="mt-2 space-y-1 text-sm">
-        {spends.map((row, index) =>
-          row.kind === "spend" && row.paidUsd !== null ? (
-            <p key={index} className="flex justify-between gap-3">
-              <span>
-                {row.label}
-                {!row.planned ? (
-                  <span className="ml-2 text-xs uppercase tracking-wide text-warning">
-                    unplanned
-                  </span>
-                ) : null}
+        {claim.spends.map((spend, index) => (
+          <p key={index} className="flex items-baseline justify-between gap-3">
+            <span>
+              {spend.label}
+              <span className="ml-2 text-xs text-muted">
+                {spend.settlement === "x402" ? "paid via x402" : "metered"}
               </span>
-              <Money usd={row.paidUsd} size="sm" />
-            </p>
-          ) : null,
-        )}
-        {reason !== undefined && reason.kind === "reason" ? (
-          <p className="text-foreground/80">
+            </span>
+            <Money usd={toUsd2(spend.amountUsd)} size="sm" />
+          </p>
+        ))}
+        {claim.decision !== null ? (
+          <p>
+            <span className="text-xs uppercase tracking-wide text-muted">
+              decision
+            </span>{" "}
             <span
               className={
-                reason.decision === "pay" ? "text-accent" : "text-warning"
+                claim.decision === "pay" ? "text-accent" : "text-warning"
               }
             >
-              {reason.decision}
-            </span>{" "}
-            — {reason.note}
+              {claim.decision}
+            </span>
           </p>
         ) : null}
-        {settle !== undefined &&
-        settle.kind === "settle" &&
+        {settle !== null &&
+        settle.status === "settled" &&
         settle.paidUsd !== null ? (
           <p className="flex items-baseline justify-between gap-3">
             <span className="text-accent">
-              paid <Money usd={settle.paidUsd} sign="+" size="sm" />
+              paid <Money usd={toUsd2(settle.paidUsd)} sign="+" size="sm" />
             </span>
             {settle.txHash !== null ? (
               <a
@@ -98,6 +89,8 @@ function ClaimCard({ claim }: { claim: FeedClaim }) {
               </a>
             ) : null}
           </p>
+        ) : deferredLine !== null ? (
+          <p className="text-xs text-muted">{deferredLine}</p>
         ) : null}
       </div>
     </li>
@@ -118,10 +111,10 @@ export default function AgentConsole() {
 
   const feed = useQuery({
     queryKey: ["agent-feed"],
-    queryFn: async (): Promise<FeedClaim[]> => {
+    queryFn: async (): Promise<PublicFeedClaim[]> => {
       const res = await fetch("/api/agent/feed");
       if (!res.ok) return [];
-      const body = (await res.json()) as { claims?: FeedClaim[] };
+      const body = (await res.json()) as { claims?: PublicFeedClaim[] };
       return body.claims ?? [];
     },
     staleTime: 5_000,
