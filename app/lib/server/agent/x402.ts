@@ -60,11 +60,28 @@ export interface PurchaseResult {
   data: unknown;
 }
 
+export interface BuyOptions {
+  /**
+   * Stable per-(claim, service, ref) key sent as an Idempotency-Key header.
+   *
+   * gw.pay() has no idempotency parameter of its own, so a retry that reaches
+   * the endpoint twice is charged twice unless the endpoint dedupes. The
+   * authority against double spending is the caller's own intent marker plus
+   * the ledger; this header is the cheap half of the belt-and-braces, honoured
+   * by providers that support it and ignored harmlessly by those that do not.
+   */
+  idempotencyKey?: string;
+}
+
 export interface BuyDeps {
   quoteAttesterRead(): Promise<ServiceQuote>;
   quoteVisionJudge(): Promise<ServiceQuote>;
   quoteChainRead(): Promise<ServiceQuote>;
-  buy(quote: ServiceQuote, body: Record<string, unknown>): Promise<PurchaseResult>;
+  buy(
+    quote: ServiceQuote,
+    body: Record<string, unknown>,
+    options?: BuyOptions,
+  ): Promise<PurchaseResult>;
 }
 
 /** Whole-cent arithmetic for cap headroom checks. Throws on malformed input
@@ -144,6 +161,7 @@ async function quoteService(
 async function buyLive(
   quote: ServiceQuote,
   body: Record<string, unknown>,
+  options?: BuyOptions,
 ): Promise<PurchaseResult> {
   if (quote.url === null) {
     return {
@@ -164,7 +182,14 @@ async function buyLive(
       data: null,
     };
   }
-  const paid = await gw.pay(quote.url, { method: "POST", body });
+  const paid = await gw.pay(quote.url, {
+    method: "POST",
+    body,
+    headers:
+      options?.idempotencyKey === undefined
+        ? undefined
+        : { "Idempotency-Key": options.idempotencyKey },
+  });
   return {
     amountUsd: atomicToUsdCeil(paid.amount),
     settlement: "x402",

@@ -22,6 +22,25 @@
 // browser that stops polling after "recorded" still gets paid: the cron
 // sweep drives the exact same block against the ledger's stored pool
 // linkage the moment the pool period ends.
+//
+// CONCURRENCY. Everything above assumed one caller per claim. On serverless
+// that assumption is false - two open tabs, or a tab and the cron sweep, run on
+// two different lambdas with two different module scopes. The whole run is
+// therefore wrapped in a Redis lock keyed by goalId (lock.ts), which is what
+// makes "the ledger carries the state" true again: the buy dedupe, the cap
+// headroom arithmetic and the record/settle steps all read a ledger snapshot
+// nobody else is writing. A poll that cannot take the lock is NOT an error -
+// a sibling owns the claim, so it reports the state the ledger already encodes
+// and the browser polls again. Settlement additionally takes a POOL-scoped
+// lock, because settle() is one-shot and pays everyone: the losers of that
+// race must spend no gas and write no red row.
+//
+// SPENDING. Two ceilings guard the wallet. The per-claim cap frozen into the
+// plan is checked here before every purchase, and the global/per-wallet daily
+// caps (budget.ts) are committed before the money moves and reconciled after,
+// because a fresh goalId would otherwise be a fresh budget. Each purchase also
+// writes a spend-intent marker before pay() so a crash between settlement and
+// the ledger append leaves a recoverable trace instead of an invisible spend.
 
 import {
   formatUnits,
@@ -46,6 +65,18 @@ import {
   type PurchaseResult,
   type ServiceQuote,
 } from "@/lib/server/agent/x402";
+import {
+  acquireLock,
+  addPendingSettlement,
+  releaseLock,
+  removePendingSettlement,
+  withLock,
+} from "@/lib/server/agent/lock";
+import {
+  reconcileDailySpend,
+  releaseDailySpend,
+  reserveDailySpend,
+} from "@/lib/server/agent/budget";
 import { junctionReadQuote } from "@/lib/server/agent/wearable";
 import type {
   EscalationContext,
@@ -55,7 +86,9 @@ import {
   ACHIEVER_PAID_ABI,
   recordResultAsSpotter,
   recordVerdictAsSpotter,
+  revertKind,
   settlePoolAsSpotter,
+  type PoolSettleLock,
   type SpotterDeps,
 } from "@/lib/server/agent/spotter";
 import {
@@ -67,6 +100,7 @@ import {
 } from "@/lib/server/judge";
 import { VERDICT_FACETS, type RecordVerdictOutcome } from "@/lib/server/verdict";
 import { optionalEnv } from "@/lib/server/env";
+import { runStatusFromLedger } from "@/lib/agent-receipt";
 
 export interface RunInput {
   goalId: Hex;
@@ -117,6 +151,58 @@ export interface RunResult {
  *  retrying a claim that is beyond recovery. */
 export const SETTLE_UNPAYABLE_MESSAGE =
   "pool settled before this claim completed; a one-shot settle cannot pay it retroactively";
+
+/** Above the run route's maxDuration (60s) so a lambda killed mid-run always
+ *  has its lock expire rather than wedging the claim until someone notices. */
+export const RUN_LOCK_TTL_MS = 75_000;
+/** Same reasoning for the pool-scoped settle, which is the more expensive
+ *  side: a Circle transaction plus an inclusion wait. */
+export const SETTLE_LOCK_TTL_MS = 75_000;
+/**
+ * How long a spend-intent marker blocks a re-buy of the same service for the
+ * same claim. Long enough that an immediate re-poll after a crash cannot pay
+ * twice, short enough that a transient gateway failure does not strand the
+ * claim: after the window the claim retries, and the worst case is one extra
+ * cheap read bounded by the per-claim cap AND the daily caps.
+ */
+export const SPEND_INTENT_TTL_MS = 600_000;
+
+/** Spread the browser's single automatic settle re-poll across a window so a
+ *  pool full of open tabs does not fire every re-poll inside the same 100ms.
+ *  Applied to the deferred entry's periodEndIso, which is the only re-poll
+ *  timing value the server owns (the client's buffer constant lives in
+ *  lib/agent-receipt.ts). Small enough to be invisible on the receipt. */
+export const SETTLE_REPOLL_JITTER_MS = 15_000;
+
+export function runLockName(goalId: string): string {
+  return `agent:run:${goalId.toLowerCase()}`;
+}
+
+export function poolSettleLockName(poolId: bigint): string {
+  return `agent:settle-pool:${poolId.toString()}`;
+}
+
+/** Exported so tests and operators can name the marker a stuck claim is
+ *  holding; nothing in the flow needs to construct it from outside. */
+export function spendIntentName(
+  goalId: string,
+  service: string,
+  ref: string,
+): string {
+  return `agent:spend:${goalId.toLowerCase()}:${service}:${ref}`;
+}
+
+/** The live pool-scoped settle lock. run.ts injects it rather than the route,
+ *  so every caller of the settle block gets it without touching route code. */
+export function livePoolSettleLock(): PoolSettleLock {
+  return {
+    acquire: (poolId) =>
+      acquireLock(poolSettleLockName(poolId), SETTLE_LOCK_TTL_MS),
+    release: async (poolId, token) => {
+      await releaseLock(poolSettleLockName(poolId), token);
+    },
+  };
+}
 
 function entryOf<K extends LedgerEntry["kind"]>(
   entries: LedgerEntry[],
@@ -203,34 +289,71 @@ function parseOpinion(data: unknown): {
   return { verdict: null, summary: null };
 }
 
+/**
+ * Why a purchase did not happen. "plan-cap" is the guardrail the receipt
+ * already shows (the plan prints its cap), so it stays a quiet skip; every
+ * other refusal is an agent-level halt the receipt must spell out.
+ */
+type PurchaseRefusal =
+  | "no-plan"
+  | "plan-cap"
+  | "daily-cap"
+  | "intent-held"
+  | "post-settlement-cap"
+  /** The purchase itself threw. Ambiguous - the gateway may or may not have
+   *  settled before the failure - and therefore the loudest of the lot. */
+  | "purchase-failed";
+
 type PurchaseOutcome =
   | { ok: true; ledger: LedgerEntry[]; purchase: PurchaseResult }
-  | { ok: false; ledger: LedgerEntry[]; message: string };
+  | {
+      ok: false;
+      ledger: LedgerEntry[];
+      message: string;
+      refusal: PurchaseRefusal;
+    };
+
+interface PurchaseRequest {
+  goalId: Hex;
+  ledger: LedgerEntry[];
+  quote: ServiceQuote;
+  /** Dedupe reference - the attester job id, or the settle tx for a chain read. */
+  ref: string;
+  body: Record<string, unknown>;
+  /** Participant this purchase is for, and the key of the per-wallet cap. */
+  walletKey: string;
+  notePrefix?: string;
+}
 
 /**
- * Execute one service purchase under the claim cap.
+ * Execute one service purchase under every ceiling that applies to it.
  *
- * The headroom check runs BEFORE the buy because an x402 purchase moves real
- * money the moment pay() runs - the ledger's own append-time invariant cannot
- * protect a spend that already settled. The append afterwards is still the
- * authority: if the actual price exceeded the estimate and breaks the cap,
- * the invariant error is surfaced loudly, never swallowed.
+ * Order matters and is deliberate:
+ *   1. per-claim cap frozen into the plan (cheap, local to the ledger)
+ *   2. global + per-wallet daily caps, COMMITTED before the buy - a check that
+ *      runs after settlement cannot stop anything
+ *   3. spend intent, written before pay() so a crash between the gateway
+ *      settling and the ledger append leaves a marker rather than an invisible
+ *      spend, and so the next poll refuses to buy the same thing again
+ *   4. the buy
+ *   5. the ledger append, which stays the authority: an actual price over the
+ *      estimate that breaks the claim cap is surfaced loudly, never swallowed
+ *
+ * Every refusal returns a message the receipt can render verbatim. Nothing here
+ * stops quietly.
  */
 async function purchaseService(
   deps: { buy: BuyDeps },
-  goalId: Hex,
-  ledger: LedgerEntry[],
-  quote: ServiceQuote,
-  ref: string,
-  body: Record<string, unknown>,
-  notePrefix?: string,
+  request: PurchaseRequest,
 ): Promise<PurchaseOutcome> {
+  const { goalId, ledger, quote, ref, body } = request;
   const plan = entryOf(ledger, "plan");
   if (plan === undefined) {
     return {
       ok: false,
       ledger,
       message: "no plan entry exists; SPOTTER emits its plan before any spend",
+      refusal: "no-plan",
     };
   }
   const spent = usdCents(totalSpentUsd(ledger));
@@ -243,12 +366,49 @@ async function purchaseService(
       message:
         `buying ${quote.service} at ${quote.estUsd} USDC would break the ` +
         `${plan.capUsd} USDC cap for this claim (already spent ${totalSpentUsd(ledger)})`,
+      refusal: "plan-cap",
     };
   }
 
-  const purchase = await deps.buy.buy(quote, body);
+  const budget = await reserveDailySpend({
+    amountUsd: quote.estUsd,
+    walletKey: request.walletKey,
+    service: quote.service,
+  });
+  if (!budget.ok) {
+    return { ok: false, ledger, message: budget.message, refusal: "daily-cap" };
+  }
+
+  const intent = spendIntentName(goalId, quote.service, ref);
+  const intentToken = await acquireLock(intent, SPEND_INTENT_TTL_MS);
+  if (intentToken === null) {
+    await releaseDailySpend(budget.reservation);
+    return {
+      ok: false,
+      ledger,
+      message:
+        `a ${quote.service} purchase for this claim is already in flight or ` +
+        "was left unreconciled by an interrupted run, and no spend row records " +
+        "it. SPOTTER will not buy the same read twice; this claim retries once " +
+        "the intent marker expires.",
+      refusal: "intent-held",
+    };
+  }
+
+  let purchase: PurchaseResult;
+  try {
+    purchase = await deps.buy.buy(quote, body, { idempotencyKey: intent });
+  } catch (err) {
+    // Ambiguous: the gateway may or may not have settled before this threw.
+    // Give the daily budget back (the ledger, not the counter, is the record
+    // of what was spent) but KEEP the intent marker, so an immediate retry
+    // cannot pay twice for the same read.
+    await releaseDailySpend(budget.reservation);
+    throw err;
+  }
+
   const noteParts = [
-    notePrefix,
+    request.notePrefix,
     purchase.gatewayTx !== null ? `gateway tx ${purchase.gatewayTx}` : undefined,
   ].filter((p): p is string => p !== undefined && p !== "");
   try {
@@ -261,10 +421,17 @@ async function purchaseService(
       settlement: purchase.settlement,
       note: noteParts.length > 0 ? noteParts.join(" ") : undefined,
     });
+    // The spend is on the ledger now, which is what dedupes future polls, so
+    // the marker has done its job. Correct the day's total to the real price.
+    await reconcileDailySpend(budget.reservation, purchase.amountUsd);
+    await releaseLock(intent, intentToken);
     return { ok: true, ledger: updated, purchase };
   } catch (err) {
     if (err instanceof LedgerInvariantError) {
-      // Money may already have moved for this purchase; say so explicitly.
+      // Money HAS moved and the ledger refused the row. Keep the marker (no
+      // re-buy) and hold the reservation at the real amount - the daily total
+      // must never understate what left the wallet.
+      await reconcileDailySpend(budget.reservation, purchase.amountUsd);
       return {
         ok: false,
         ledger,
@@ -273,9 +440,41 @@ async function purchaseService(
           `the estimate and broke the claim cap AFTER settlement ` +
           `(${purchase.gatewayTx !== null ? `gateway tx ${purchase.gatewayTx}` : purchase.settlement}): ` +
           err.message,
+        refusal: "post-settlement-cap",
       };
     }
     throw err;
+  }
+}
+
+/**
+ * purchaseService, with a thrown failure converted into a refusal the caller
+ * can record.
+ *
+ * A purchase that throws is the worst case on this path: real USDC may have
+ * left the wallet and there is no ledger row for it. Letting the exception
+ * propagate turns that into a bare 500 with NOTHING written down - the failure
+ * mode the "no silent failures on a money path" rule exists to forbid. Every
+ * caller writes the returned message to the ledger, so the halt is on the
+ * receipt permanently instead of living for ten minutes inside a Redis marker.
+ */
+async function attemptPurchase(
+  deps: { buy: BuyDeps },
+  request: PurchaseRequest,
+): Promise<PurchaseOutcome> {
+  try {
+    return await purchaseService(deps, request);
+  } catch (err) {
+    const detail = err instanceof Error ? err.message : String(err);
+    return {
+      ok: false,
+      ledger: request.ledger,
+      refusal: "purchase-failed",
+      message:
+        `the ${request.quote.service} purchase failed mid-flight (${detail}). ` +
+        "SPOTTER cannot tell whether the payment settled before it failed, so " +
+        "it will not buy this read again until the spend-intent marker expires.",
+    };
   }
 }
 
@@ -374,15 +573,15 @@ async function chainReadVerification(
   };
   let outcome: PurchaseOutcome;
   try {
-    outcome = await purchaseService(
-      deps,
+    outcome = await purchaseService(deps, {
       goalId,
       ledger,
       quote,
-      txHash,
+      ref: txHash,
       body,
-      "independent verification read of the settle transaction.",
-    );
+      walletKey: participant,
+      notePrefix: "independent verification read of the settle transaction.",
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     return {
@@ -415,40 +614,37 @@ export interface SettleClaimOutcome {
   ledger: LedgerEntry[];
 }
 
-// One settle at a time per claim within this process. The browser-driven run
-// route and the cron sweep frequently share a warm instance, and the ledger
-// store is read-modify-write (ledger.ts), so unserialized concurrent settles
-// could drop each other's entries. Cross-instance overlap still exists; the
-// AchieverPaid reconciliation in the already-settled branch is what makes
-// that overlap converge on the truth instead of a false failure.
-const settleLocks = new Map<string, Promise<unknown>>();
-
 /**
  * The one settle block, shared by the run loop and the sweep route: settle
  * the pool from SPOTTER's wallet the moment the period allows it, append the
  * same ledger entries either caller would, and report what actually happened.
  * A deferral is recorded once, not per poll; errors are recorded once per
  * distinct failure so a two-minute cron cannot flood the ledger.
+ *
+ * Takes the same per-goal lock the run loop takes, so the cron sweep and a
+ * polling browser cannot drive the same claim at once across two lambdas. The
+ * run loop calls the unlocked body directly because it already holds it.
  */
 export async function settleRecordedClaim(
   deps: SettleClaimDeps,
   input: { goalId: Hex; poolId: bigint; participant: Address },
 ): Promise<SettleClaimOutcome> {
-  const key = input.goalId.toLowerCase();
-  const run = (settleLocks.get(key) ?? Promise.resolve()).then(
-    () => settleClaimUnlocked(deps, input),
+  const outcome = await withLock(
+    runLockName(input.goalId),
+    RUN_LOCK_TTL_MS,
     () => settleClaimUnlocked(deps, input),
   );
-  const tail = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  settleLocks.set(key, tail);
-  try {
-    return await run;
-  } finally {
-    if (settleLocks.get(key) === tail) settleLocks.delete(key);
-  }
+  if (outcome.acquired) return outcome.value;
+  // A sibling (a polling browser, or an overlapping sweep) owns this claim
+  // right now. Not a failure and not a deferral to record: report what the
+  // ledger currently says and let the holder finish.
+  const ledger = await readLedger(input.goalId);
+  return {
+    status: ledger.some((e) => e.kind === "settle" && e.status === "settled")
+      ? "settled"
+      : "deferred",
+    ledger,
+  };
 }
 
 async function settleClaimUnlocked(
@@ -457,23 +653,43 @@ async function settleClaimUnlocked(
 ): Promise<SettleClaimOutcome> {
   let ledger = await readLedger(input.goalId);
   try {
-    const outcome = await settlePoolAsSpotter(deps.spotter, {
-      poolId: input.poolId,
-      goalId: input.goalId,
-      participant: input.participant,
-    });
+    const outcome = await settlePoolAsSpotter(
+      {
+        ...deps.spotter,
+        // Injected here rather than by the routes: every caller of this block
+        // gets pool-scoped exclusion without route code knowing it exists.
+        settleLock: deps.spotter.settleLock ?? livePoolSettleLock(),
+      },
+      {
+        poolId: input.poolId,
+        goalId: input.goalId,
+        participant: input.participant,
+      },
+    );
 
     if (outcome.status === "not-due") {
+      // Queue it for the sweep, scored by the moment it becomes settleable, so
+      // the cron reads only claims that are actually due.
+      await addPendingSettlement(input.goalId, Number(outcome.periodEnd));
       if (entryOf(ledger, "settle") === undefined) {
         ledger = await appendLedger(input.goalId, {
           kind: "settle",
           status: "deferred",
           periodEndIso: new Date(
-            Number(outcome.periodEnd) * 1000,
+            Number(outcome.periodEnd) * 1000 + settleRepollJitterMs(),
           ).toISOString(),
           note: "the pool period is still running; SPOTTER settles the moment it ends",
         });
       }
+      return { status: "deferred", ledger };
+    }
+
+    if (outcome.status === "busy") {
+      // Another claim in this pool is settling it right now. ONE settle() pays
+      // every eligible achiever, so racing it would burn gas on a certain
+      // revert and stamp a red row on a claim the winner is about to pay. No
+      // transaction, no ledger entry: the next poll reads the settled pool and
+      // reconciles against AchieverPaid.
       return { status: "deferred", ledger };
     }
 
@@ -485,6 +701,7 @@ async function settleClaimUnlocked(
       if (
         ledger.some((e) => e.kind === "settle" && e.status === "settled")
       ) {
+        await removePendingSettlement(input.goalId);
         return { status: "settled", ledger };
       }
       // ONE settle() pays EVERY eligible achiever in the pool, so another
@@ -520,17 +737,20 @@ async function settleClaimUnlocked(
             paidUsd: formatUnits(payout.amount, 6),
             note: "the pool settled in one transaction covering every eligible achiever; this participant's AchieverPaid payout is in it",
           });
+          await removePendingSettlement(input.goalId);
           return { status: "settled", ledger };
         }
       }
       // The pool settled without paying this participant - settle() is
-      // one-shot, so this claim can never pay now.
+      // one-shot, so this claim can never pay now. Terminal: drop it from the
+      // sweep queue rather than retrying it every two minutes forever.
       ledger = await appendErrorOnce(
         input.goalId,
         ledger,
         "settle",
         SETTLE_UNPAYABLE_MESSAGE,
       );
+      await removePendingSettlement(input.goalId);
       return { status: "error", ledger };
     }
 
@@ -549,19 +769,49 @@ async function settleClaimUnlocked(
       paidUsd: outcome.participantPaidUsd,
       note: verification.note,
     });
+    await removePendingSettlement(input.goalId);
     return { status: "settled", ledger };
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     ledger = await appendErrorOnce(input.goalId, ledger, "settle", message);
+    // Due but unsettled: keep it in the sweep queue so the retry is driven by
+    // the cron rather than by whether a browser tab happens to still be open.
+    await addPendingSettlement(input.goalId, Math.floor(Date.now() / 1000));
     return { status: "error", ledger };
   }
 }
 
+/** Per-claim jitter for the deferred re-poll moment. Random on purpose: the
+ *  point is that N tabs on one pool do not converge on one instant. */
+function settleRepollJitterMs(): number {
+  return Math.floor(Math.random() * SETTLE_REPOLL_JITTER_MS);
+}
+
 /**
- * Drive one claim as far as it can go right now. Safe to call repeatedly;
- * the ledger carries the state between polls.
+ * Drive one claim as far as it can go right now. Safe to call repeatedly and
+ * safe to call concurrently: the ledger carries the state between polls, and
+ * the per-goal lock is what keeps that state from being read stale.
+ *
+ * A poll that cannot take the lock reports the state the ledger already
+ * encodes instead of an error. That is not a fudge - a sibling poll owns the
+ * claim and is writing that state right now, so "what the ledger says" is the
+ * honest answer, and the browser polls again a second later.
  */
 export async function runAgentForGoal(
+  deps: RunDeps,
+  input: RunInput,
+): Promise<RunResult> {
+  const outcome = await withLock(
+    runLockName(input.goalId),
+    RUN_LOCK_TTL_MS,
+    () => runClaimUnlocked(deps, input),
+  );
+  if (outcome.acquired) return outcome.value;
+  const ledger = await readLedger(input.goalId);
+  return { status: runStatusFromLedger(ledger) ?? "verifying", ledger };
+}
+
+async function runClaimUnlocked(
   deps: RunDeps,
   input: RunInput,
 ): Promise<RunResult> {
@@ -630,22 +880,28 @@ export async function runAgentForGoal(
     findSpend(ledger, (await getCheapQuote()).service, input.attesterId) ===
     undefined
   ) {
-    const outcome = await purchaseService(
-      deps,
-      input.goalId,
+    const outcome = await attemptPurchase(deps, {
+      goalId: input.goalId,
       ledger,
-      await getCheapQuote(),
-      input.attesterId,
-      { attesterId: input.attesterId, goalSpec: input.goalSpec },
-    );
+      quote: await getCheapQuote(),
+      ref: input.attesterId,
+      body: { attesterId: input.attesterId, goalSpec: input.goalSpec },
+      walletKey: input.address,
+    });
     ledger = outcome.ledger;
     if (!outcome.ok) {
-      ledger = await appendLedger(input.goalId, {
-        kind: "error",
-        stage: "buy",
-        message: outcome.message,
-      });
-      return { status: "cap-exceeded", ledger };
+      ledger = await appendErrorOnce(
+        input.goalId,
+        ledger,
+        "buy",
+        outcome.message,
+      );
+      // A guardrail refusing to spend and a purchase blowing up are different
+      // things, and the receipt must not call one the other.
+      return {
+        status: outcome.refusal === "purchase-failed" ? "error" : "cap-exceeded",
+        ledger,
+      };
     }
   }
 
@@ -713,13 +969,12 @@ export async function runAgentForGoal(
       poolUsd !== undefined
         ? `escalating. i can't read this and i'm not paying out ${poolUsd} USDC on something i can't read.`
         : "escalating. i can't read this and i'm not paying out on something i can't read.";
-    const outcome = await purchaseService(
-      deps,
-      input.goalId,
+    const outcome = await attemptPurchase(deps, {
+      goalId: input.goalId,
       ledger,
       quote,
-      input.attesterId,
-      {
+      ref: input.attesterId,
+      body: {
         attesterId: input.attesterId,
         goalSpec: input.goalSpec,
         verdict: {
@@ -728,8 +983,9 @@ export async function runAgentForGoal(
           reason: verdict.reason,
         },
       },
-      escalationLine,
-    );
+      walletKey: input.address,
+      notePrefix: escalationLine,
+    });
     ledger = outcome.ledger;
     if (outcome.ok) {
       const opinion = parseOpinion(outcome.purchase.data);
@@ -748,6 +1004,18 @@ export async function runAgentForGoal(
       // Not an error state: the agent declines the purchase and decides with
       // what it has. The reason step is told why.
       escalation = { kind: "skipped", why: outcome.message };
+      if (outcome.refusal !== "plan-cap") {
+        // The per-claim cap is already on the receipt (the plan prints it), so
+        // hitting it needs no extra row. Every other halt - the daily ceiling,
+        // an unreconciled intent - is invisible otherwise, and a spend that
+        // stops for a reason nobody can see is a silent failure.
+        ledger = await appendErrorOnce(
+          input.goalId,
+          ledger,
+          "buy",
+          outcome.message,
+        );
+      }
     }
   }
 
@@ -823,9 +1091,9 @@ export async function runAgentForGoal(
             multiplierBps,
           );
         } catch (err) {
-          const message = err instanceof Error ? err.message : String(err);
           // Already on chain is the end state we wanted; anything else throws.
-          if (!message.includes("ALREADY_RECORDED")) throw err;
+          // Same matcher the SPOTTER path uses, so both decode reverts alike.
+          if (revertKind(err) !== "already-recorded") throw err;
         }
       }
 
@@ -867,7 +1135,7 @@ export async function runAgentForGoal(
         message,
       });
       return {
-        status: message.includes("NOT_PARTICIPANT") ? "blocked" : "error",
+        status: revertKind(err) === "not-participant" ? "blocked" : "error",
         ledger,
       };
     }
@@ -875,7 +1143,9 @@ export async function runAgentForGoal(
 
   // SETTLE WHEN SETTLEABLE - SPOTTER pays from its own wallet the moment the
   // pool period allows it, through the same block the sweep route drives.
-  const outcome = await settleRecordedClaim(deps, {
+  // Called unlocked on purpose: this run already holds the per-goal lock, and
+  // the lock is not reentrant.
+  const outcome = await settleClaimUnlocked(deps, {
     goalId: input.goalId,
     poolId: input.poolId,
     participant: input.address,
