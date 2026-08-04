@@ -2,6 +2,11 @@ import { describe, it, expect } from "vitest";
 import {
   humanizeTxError,
   canCoverJoinCosts,
+  canCoverUsdcCosts,
+  fundingShortfallDetail,
+  FAUCET_URL,
+  FUNDING_HELP_DETAIL,
+  FUNDING_STEPS,
   JOIN_GAS_MARGIN,
 } from "@/lib/tx-errors";
 
@@ -44,6 +49,29 @@ const REVERT_FIXTURE = (reason: string) =>
     "Docs: https://viem.sh/docs/contract/writeContract",
     "Version: viem@2.52.0",
   ].join("\n");
+
+// viem's ChainMismatchError, and the EIP-1193 code a wallet returns when the
+// network was never added.
+const CHAIN_MISMATCH_FIXTURE = [
+  "The current chain of the wallet (id: 1 – Ethereum) does not match the target chain for the transaction (id: 5042002 – Arc Testnet).",
+  "",
+  "Current Chain ID:  1",
+  "Expected Chain ID: 5042002 – Arc Testnet",
+  "Version: viem@2.52.0",
+].join("\n");
+
+// A generic failure that happens to print the request arguments. viem writes
+// "chain:" into this dump for every write, so the wrong-network rule must not
+// fire on it.
+const GENERIC_WITH_CHAIN_ARGS_FIXTURE = [
+  "An unknown RPC error occurred.",
+  "",
+  "Request Arguments:",
+  "  chain:  Arc Testnet (id: 5042002)",
+  "  from:   0x8ba1f109551bD432803012645Ac136ddd64DBA72",
+  "  to:     0xc4274eF2cBe28f77Af31b980055Cc1171818390C",
+  "Version: viem@2.52.0",
+].join("\n");
 
 const USER_REJECTED_FIXTURE = [
   "User rejected the request.",
@@ -97,6 +125,47 @@ describe("humanizeTxError", () => {
     expect(result.title).toBe("Not enough USDC");
   });
 
+  it("maps a chain mismatch to the wrong-network message", () => {
+    const result = humanizeTxError(viemError(CHAIN_MISMATCH_FIXTURE));
+    expect(result.title).toBe("Wallet is on the wrong network");
+    expect(result.detail).toContain("Arc Testnet");
+    expect(result.detail).toContain("5042002");
+    expect(result.detail).not.toContain("viem");
+  });
+
+  it("maps the 4902 unrecognized-chain code to the wrong-network message", () => {
+    const result = humanizeTxError({
+      code: 4902,
+      message: "Unrecognized chain ID 0x4CF4D2. Try adding the chain first.",
+    });
+    expect(result.title).toBe("Wallet is on the wrong network");
+  });
+
+  it("maps a switch-network prompt to the wrong-network message", () => {
+    const result = humanizeTxError(
+      viemError("Wallet failed to switch to the network."),
+    );
+    expect(result.title).toBe("Wallet is on the wrong network");
+  });
+
+  it("does not call an unrelated failure a wrong-network error", () => {
+    // "chain: Arc Testnet" rides along in viem's request-arguments dump on
+    // every failed write; a bare /chain|network/ rule would mislabel it.
+    const result = humanizeTxError(
+      viemError(GENERIC_WITH_CHAIN_ARGS_FIXTURE),
+    );
+    expect(result.title).toBe("Transaction failed");
+  });
+
+  it("keeps a revert reason ahead of the wrong-network rule", () => {
+    const result = humanizeTxError(
+      viemError(
+        [REVERT_FIXTURE("ALREADY_JOINED"), "  chain: Arc Testnet"].join("\n"),
+      ),
+    );
+    expect(result.title).toBe("Already in");
+  });
+
   it("maps a user rejection to the cancelled message", () => {
     const result = humanizeTxError(viemError(USER_REJECTED_FIXTURE));
     expect(result.title).toBe("Transaction cancelled");
@@ -145,6 +214,25 @@ describe("humanizeTxError", () => {
     const result = humanizeTxError(viemError(INSUFFICIENT_FUNDS_FIXTURE));
     expect(result.raw).toBe(INSUFFICIENT_FUNDS_FIXTURE);
     expect(result.raw).toContain("Version: viem@2.52.0");
+  });
+
+  it("maps a mined-then-reverted transaction to the reverted message", () => {
+    // What the deposit and join flows throw when receipt.status is not
+    // "success": the transaction was mined, so nothing "went wrong sending"
+    // it, and nothing moved.
+    const result = humanizeTxError(
+      new Error(
+        "The fundPool transaction 0xabc reverted on Arc testnet.",
+      ),
+    );
+    expect(result.title).toBe("Transaction reverted");
+    expect(result.detail).toContain("nothing");
+    expect(result.detail).not.toContain("Try again");
+  });
+
+  it("keeps a known revert reason ahead of the generic reverted rule", () => {
+    const result = humanizeTxError(viemError(REVERT_FIXTURE("POOL_FULL")));
+    expect(result.title).toBe("Pool is full");
   });
 
   it("falls back to a generic line for unknown errors", () => {
@@ -199,5 +287,58 @@ describe("canCoverJoinCosts", () => {
   it("honours a custom gas margin", () => {
     expect(canCoverJoinCosts(100n, 0n, 100n)).toBe(true);
     expect(canCoverJoinCosts(99n, 0n, 100n)).toBe(false);
+  });
+
+  it("is the same check the deposit flows use", () => {
+    // One implementation, two call-site names: joining pulls an entry fee,
+    // depositing pulls a funding amount, both on top of the same gas margin.
+    expect(canCoverJoinCosts).toBe(canCoverUsdcCosts);
+  });
+});
+
+describe("canCoverUsdcCosts", () => {
+  it("rejects a zero balance against a deposit", () => {
+    expect(canCoverUsdcCosts(0n, 10_000_000n)).toBe(false);
+  });
+
+  it("rejects a balance that covers the deposit but not the gas", () => {
+    expect(canCoverUsdcCosts(10_000_000n, 10_000_000n)).toBe(false);
+  });
+
+  it("accepts a balance covering the deposit plus the margin", () => {
+    expect(canCoverUsdcCosts(10_000_000n + JOIN_GAS_MARGIN, 10_000_000n)).toBe(
+      true,
+    );
+  });
+});
+
+describe("funding help copy", () => {
+  it("tells the user to paste at the faucet, never to send", () => {
+    const steps = FUNDING_STEPS.join(" ").toLowerCase();
+    expect(steps).toContain("copy");
+    expect(steps).toContain("faucet.circle.com");
+    expect(steps).toContain("arc testnet");
+    expect(steps).toContain("paste");
+    // At faucet.circle.com you paste an address and pick a network. Telling
+    // someone to "send" test USDC to their own address is the wrong mental
+    // model and leaves a first-run user stuck.
+    expect(steps).not.toContain("send");
+  });
+
+  it("points at the canonical faucet URL", () => {
+    expect(FAUCET_URL).toBe("https://faucet.circle.com");
+  });
+
+  it("explains that Arc gas is USDC in the one-line detail", () => {
+    expect(FUNDING_HELP_DETAIL).toContain("gas in USDC");
+    expect(FUNDING_HELP_DETAIL).toContain("Arc Testnet");
+    expect(FUNDING_HELP_DETAIL).toContain("faucet.circle.com");
+  });
+
+  it("puts the balance and the requirement in the shortfall detail", () => {
+    const detail = fundingShortfallDetail("0.00", "10.05");
+    expect(detail).toContain("0.00 USDC");
+    expect(detail).toContain("10.05 USDC");
+    expect(detail).toContain(FUNDING_HELP_DETAIL);
   });
 });

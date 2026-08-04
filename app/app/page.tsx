@@ -1,5 +1,6 @@
 import Link from "next/link";
 import GoalIntent from "@/components/GoalIntent";
+import { Badge } from "@/components/ui";
 
 const steps = [
   {
@@ -8,11 +9,11 @@ const steps = [
   },
   {
     title: "SPOTTER buys the proof-check",
-    body: "An agent with its own wallet buys whatever verification your claim needs, per claim, under a hard budget. Every cent prints on screen.",
+    body: "SPOTTER pays for the proof-check itself, per claim, out of its own budget and under a hard cap. Every cent prints on screen.",
   },
   {
     title: "Paid the second it is proven",
-    body: "The verdict comes out of a confidential enclave - nobody ever sees your health data - and SPOTTER pays you from its own wallet. No human in the loop.",
+    body: "The verdict comes out of a confidential enclave - nobody ever sees your health data - and SPOTTER settles the pool on Arc. The bounty leaves the sponsor's pool and lands in your wallet. SPOTTER covers the gas and the proof-check, not the bounty. No human in the loop.",
   },
 ];
 
@@ -28,10 +29,20 @@ export default function Home() {
         </h1>
         <p className="mx-auto mt-5 max-w-xl text-lg leading-relaxed text-muted">
           Say what you are going to do. A sponsor puts up the USDC. An agent
-          buys whatever it needs to check your proof, decides, and pays you out
-          of its own wallet. No human in the loop, and nobody ever sees your
-          health data.
+          buys whatever it needs to check your proof, decides, and releases the
+          sponsor&apos;s money to you on the spot. No human in the loop, and
+          nobody ever sees your health data.
         </p>
+        {/* The one honest line. "Put money on it" read like a bill, and the
+            only testnet disclosure in the app used to be on /pools - a
+            stranger deserves to know the stakes before they type anything. */}
+        <div className="mx-auto mt-6 flex max-w-xl flex-col items-center gap-2 sm:flex-row sm:justify-center">
+          <Badge tone="warning">Arc Testnet</Badge>
+          <p className="text-sm leading-relaxed text-muted">
+            The USDC is test USDC. You put in nothing and nothing here can cost
+            you real money.
+          </p>
+        </div>
         <GoalIntent />
         <div className="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
           <Link
@@ -39,6 +50,12 @@ export default function Home() {
             className="text-sm font-medium text-muted underline-offset-4 hover:text-foreground hover:underline"
           >
             or browse the live pools
+          </Link>
+          <Link
+            href="/pools/create"
+            className="text-sm font-medium text-muted underline-offset-4 hover:text-foreground hover:underline"
+          >
+            sponsoring instead? put up a bounty
           </Link>
         </div>
       </section>
