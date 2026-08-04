@@ -38,7 +38,14 @@ async function loadRun() {
     "0x9bf5e4b54361DEAca4314c1d8de3aeB30111F042",
   );
   vi.resetModules();
-  return import("@/lib/server/agent/run");
+  const run = await import("@/lib/server/agent/run");
+  // The same module instances run.ts is holding, so a test can stand in for a
+  // sibling lambda by taking a lock or spending budget out from under it.
+  const lock = await import("@/lib/server/agent/lock");
+  const budget = await import("@/lib/server/agent/budget");
+  lock.resetLocalCoordinationState();
+  budget.resetLocalBudgetState();
+  return { ...run, lock, budget };
 }
 
 function fakeExecutor() {
@@ -192,7 +199,7 @@ describe("runAgentForGoal", () => {
   });
 
   it("records via the legacy signer while the on-chain roles still point at it, deferring settlement", async () => {
-    const { runAgentForGoal } = await loadRun();
+    const { runAgentForGoal, SETTLE_REPOLL_JITTER_MS } = await loadRun();
     const deps = makeDeps();
     (deps.spotter as { nowSeconds: () => bigint }).nowSeconds = () => 500n;
 
@@ -211,10 +218,15 @@ describe("runAgentForGoal", () => {
         .createContractExecutionTransaction,
     ).not.toHaveBeenCalled();
     const settle = result.ledger.find((e) => e.kind === "settle");
-    expect(settle).toMatchObject({
-      status: "deferred",
-      periodEndIso: "1970-01-01T00:16:40.000Z",
-    });
+    expect(settle).toMatchObject({ status: "deferred" });
+    // periodEndIso carries the pool's periodEnd plus a small per-claim jitter,
+    // so a pool full of open tabs does not fire every settle re-poll in the
+    // same instant. Never earlier than the real period end.
+    const deferredAt = Date.parse(
+      (settle as { periodEndIso: string }).periodEndIso,
+    );
+    expect(deferredAt).toBeGreaterThanOrEqual(1_000_000);
+    expect(deferredAt).toBeLessThan(1_000_000 + SETTLE_REPOLL_JITTER_MS);
     // Plain prose only - the raw epoch lives in periodEndIso, not the note.
     expect((settle as { note: string }).note).not.toMatch(/1000/);
     // The plan carries the pool linkage the sweep route needs.
@@ -768,6 +780,229 @@ describe("runAgentForGoal", () => {
     expect(error.message).toContain("reconciliation read failed");
     // Not the terminal message, so the sweep filter keeps retrying it.
     expect(error.message).not.toBe(SETTLE_UNPAYABLE_MESSAGE);
+  });
+
+  it("holds the claim under one lock: a second concurrent poll never re-buys", async () => {
+    // Two open tabs, or a tab and the cron sweep. Without the lock both polls
+    // read the same empty ledger, both pass the cap check, and both pay the
+    // attester read - real USDC, twice, for one claim.
+    const { runAgentForGoal } = await loadRun();
+    let releasePoll: () => void = () => undefined;
+    const held = new Promise<void>((resolve) => {
+      releasePoll = resolve;
+    });
+    let pollEntered: () => void = () => undefined;
+    const entered = new Promise<void>((resolve) => {
+      pollEntered = resolve;
+    });
+    const poll = vi.fn().mockImplementation(async () => {
+      pollEntered();
+      await held;
+      return { status: "verifying", verdict: null };
+    });
+    const deps = makeDeps({ poll });
+
+    const first = runAgentForGoal(deps, INPUT);
+    await entered;
+
+    const second = await runAgentForGoal(deps, INPUT);
+
+    // The sibling reports what the ledger already says rather than an error.
+    expect(second.status).toBe("verifying");
+    expect(deps.buy.buy).toHaveBeenCalledTimes(1);
+
+    releasePoll();
+    const firstResult = await first;
+    expect(firstResult.status).toBe("verifying");
+    expect(deps.buy.buy).toHaveBeenCalledTimes(1);
+    expect(firstResult.ledger.filter((e) => e.kind === "spend")).toHaveLength(1);
+  });
+
+  it("halts on the global daily cap and says why, in the ledger", async () => {
+    // The per-claim cap is scoped to one goalId, so a fresh goalId is a fresh
+    // budget. This ceiling is what makes the wallet un-drainable by volume.
+    vi.stubEnv("AGENT_DAILY_CAP_USD", "0.01");
+    const { runAgentForGoal } = await loadRun();
+    const poll = vi.fn();
+    const deps = makeDeps({ poll });
+
+    const result = await runAgentForGoal(deps, INPUT);
+
+    expect(result.status).toBe("cap-exceeded");
+    expect(deps.buy.buy).not.toHaveBeenCalled();
+    expect(poll).not.toHaveBeenCalled();
+    const error = result.ledger.find((e) => e.kind === "error") as {
+      stage: string;
+      message: string;
+    };
+    expect(error.stage).toBe("buy");
+    expect(error.message).toContain("daily spend cap of 0.01 USDC");
+    expect(error.message).toContain("nobody is paid");
+  });
+
+  it("halts on the per-wallet daily cap when one wallet keeps opening claims", async () => {
+    vi.stubEnv("AGENT_WALLET_DAILY_CAP_USD", "0.02");
+    const { runAgentForGoal } = await loadRun();
+    const poll = vi.fn().mockResolvedValue({ status: "verifying", verdict: null });
+    const deps = makeDeps({ poll });
+
+    // First claim spends this wallet's whole daily allowance.
+    const first = await runAgentForGoal(deps, INPUT);
+    expect(first.status).toBe("verifying");
+
+    // A brand new goalId - a fresh per-claim cap, but not a fresh wallet.
+    const second = await runAgentForGoal(deps, {
+      ...INPUT,
+      goalId: ("0x" + "cd".repeat(32)) as Hex,
+      attesterId: "job-2",
+    });
+
+    expect(second.status).toBe("cap-exceeded");
+    const error = second.ledger.find((e) => e.kind === "error") as {
+      stage: string;
+      message: string;
+    };
+    expect(error.stage).toBe("buy");
+    expect(error.message).toContain("per-wallet daily spend cap of 0.02 USDC");
+  });
+
+  it("refuses to re-buy a read whose spend intent is still outstanding", async () => {
+    // A run that died between the gateway settling and the ledger append
+    // leaves the marker behind. The money may already be gone; buying again
+    // would spend twice for one read.
+    const { runAgentForGoal, spendIntentName, lock } = await loadRun();
+    const held = await lock.acquireLock(
+      spendIntentName(GOAL, "attester-read", "job-1"),
+      60_000,
+    );
+    expect(held).not.toBeNull();
+    const deps = makeDeps({ poll: vi.fn() });
+
+    const result = await runAgentForGoal(deps, INPUT);
+
+    expect(result.status).toBe("cap-exceeded");
+    expect(deps.buy.buy).not.toHaveBeenCalled();
+    const error = result.ledger.find((e) => e.kind === "error") as {
+      stage: string;
+      message: string;
+    };
+    expect(error.stage).toBe("buy");
+    expect(error.message).toContain("will not buy the same read twice");
+  });
+
+  it("records a purchase that threw, instead of failing with an empty ledger", async () => {
+    // The worst case on this path: the gateway may have taken the money and
+    // there is no spend row for it. A bare 500 with nothing written down is
+    // the silent failure the money rule forbids.
+    const { runAgentForGoal } = await loadRun();
+    const buy = fakeBuy({
+      buy: vi.fn().mockRejectedValue(new Error("gateway timeout after 30s")),
+    });
+    const deps = makeDeps({ buy, poll: vi.fn() });
+
+    const result = await runAgentForGoal(deps, INPUT);
+
+    // Not "cap-exceeded": no guardrail refused this, the purchase blew up.
+    expect(result.status).toBe("error");
+    const error = result.ledger.find((e) => e.kind === "error") as {
+      stage: string;
+      message: string;
+    };
+    expect(error.stage).toBe("buy");
+    expect(error.message).toContain("gateway timeout after 30s");
+    expect(error.message).toContain("cannot tell whether the payment settled");
+    // And the marker keeps the next poll from buying the same read again.
+    const second = await runAgentForGoal(deps, INPUT);
+    expect(buy.buy).toHaveBeenCalledTimes(1);
+    expect(
+      second.ledger.filter((e) => e.kind === "error" && e.stage === "buy"),
+    ).toHaveLength(2);
+  });
+
+  it("defers the losers of a pool settle race without gas or an error row", async () => {
+    const { settleRecordedClaim, poolSettleLockName, lock } = await loadRun();
+    const executor = fakeExecutor();
+    const deps = {
+      spotter: { circle: executor, reader: fakeReader(), nowSeconds: () => 2_000n },
+      buy: fakeBuy(),
+    };
+    // Stand in for the claim that won the race and is mid-settlement.
+    expect(await lock.acquireLock(poolSettleLockName(7n), 60_000)).not.toBeNull();
+
+    const outcome = await settleRecordedClaim(deps, {
+      goalId: GOAL,
+      poolId: 7n,
+      participant: USER,
+    });
+
+    expect(outcome.status).toBe("deferred");
+    expect(executor.createContractExecutionTransaction).not.toHaveBeenCalled();
+    expect(outcome.ledger.some((e) => e.kind === "error")).toBe(false);
+    expect(outcome.ledger.some((e) => e.kind === "settle")).toBe(false);
+  });
+
+  it("reconciles a lost settle race in-request instead of two minutes later", async () => {
+    // The settle went out and reverted because another claim landed first.
+    // The old path wrote a red "reverted on Arc testnet" row on a claim the
+    // winning transaction had just paid, and self-healed only on the next cron.
+    const { settleRecordedClaim } = await loadRun();
+    const reader = fakeReader({
+      getPoolState: vi
+        .fn()
+        .mockResolvedValueOnce({ settled: false, periodEnd: 1_000n })
+        .mockResolvedValue({ settled: true, periodEnd: 1_000n }),
+      achieverPayouts: vi
+        .fn()
+        .mockRejectedValue(new Error("tx 0xfeed reverted on Arc testnet")),
+      settledPayout: vi
+        .fn()
+        .mockResolvedValue({ txHash: "0xwinner", amount: 25_000_000n }),
+    });
+    const deps = {
+      spotter: { circle: fakeExecutor(), reader, nowSeconds: () => 2_000n },
+      buy: fakeBuy(),
+    };
+
+    const outcome = await settleRecordedClaim(deps, {
+      goalId: GOAL,
+      poolId: 7n,
+      participant: USER,
+    });
+
+    expect(outcome.status).toBe("settled");
+    expect(outcome.ledger.some((e) => e.kind === "error")).toBe(false);
+    expect(
+      outcome.ledger.find((e) => e.kind === "settle"),
+    ).toMatchObject({ status: "settled", txHash: "0xwinner", paidUsd: "25" });
+  });
+
+  it("queues a deferred claim for the sweep and dequeues it once it is paid", async () => {
+    const { runAgentForGoal, settleRecordedClaim, lock } = await loadRun();
+    const reader = fakeReader({
+      oracleAddress: vi.fn().mockResolvedValue(SPOTTER),
+      attesterAddress: vi.fn().mockResolvedValue(SPOTTER),
+    });
+    const deps = makeDeps({
+      spotter: { circle: fakeExecutor(), reader, nowSeconds: () => 500n },
+    });
+
+    const recorded = await runAgentForGoal(deps, INPUT);
+    expect(recorded.status).toBe("recorded");
+    // Scored by the pool's periodEnd, so the cron reads it only when due.
+    expect(await lock.listDuePendingSettlements(999, 10)).toEqual([]);
+    expect(await lock.listDuePendingSettlements(1_000, 10)).toEqual([
+      GOAL.toLowerCase(),
+    ]);
+
+    const paid = await settleRecordedClaim(
+      {
+        spotter: { circle: fakeExecutor(), reader, nowSeconds: () => 2_000n },
+        buy: fakeBuy(),
+      },
+      { goalId: GOAL, poolId: 7n, participant: USER },
+    );
+    expect(paid.status).toBe("settled");
+    expect(await lock.listDuePendingSettlements(9_999, 10)).toEqual([]);
   });
 
   it("returns paid from the ledger fast path without re-running anything", async () => {
