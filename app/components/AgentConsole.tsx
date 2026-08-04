@@ -152,9 +152,21 @@ export default function AgentConsole() {
                 </a>
               ) : null}
             </div>
+            {/* Precise about whose money moves, on both sides. Pay side:
+             *  settle() pays achievers out of the pool balance held by
+             *  HealthPools (_payAchievers decrements p.balance and _push
+             *  transfers from the contract), so the bounty never comes out of
+             *  this wallet - it covers gas only. Buy side: verification is NOT
+             *  bought with this wallet either. x402.ts uses a separate spend
+             *  key (X402_PRIVATE_KEY) because GatewayClient needs a raw private
+             *  key, and with that key unset the purchase is metered/prepaid
+             *  under an API key instead. Naming this wallet as the buyer would
+             *  repeat the same "whose money" error this copy exists to fix. */}
             <p className="mt-4 text-sm text-muted">
-              This wallet buys the verification each claim needs and pays
-              achievers from its own balance. Nobody signs for it.
+              This wallet pays the gas and calls settle(). The bounty is the
+              sponsor's USDC, released from the pool — not from here.
+              Verification is bought separately, under a hard per-claim cap.
+              Nobody signs for any of it.
             </p>
           </>
         ) : (

@@ -629,6 +629,24 @@ function EvidenceUploadInner({
         is fine. Fake is not.
       </p>
 
+      {/* Disclosure at the point of upload, not after it. Every clause here is
+       *  backed by code: the document is sent only to the attester for
+       *  inference (lib/server/judge.ts), it is never written to disk or chain
+       *  and never logged, and the self-hosted attester journals ids,
+       *  timestamps and the verdict only - never document bytes
+       *  (services/confidential-shim/src/jobs.ts). Deliberately claims no
+       *  encryption and no certification we cannot evidence. It also does not
+       *  promise a bare yes/no: the verdict is {verified, confidence, reason}
+       *  and AgentReceipt renders that reason to this same user moments later,
+       *  so the copy must account for the note or it contradicts the next
+       *  screen. The load-bearing claim is that the document itself never
+       *  comes back and is never kept. */}
+      <p className="rounded-xl border border-edge bg-surface-raised p-3 text-xs text-muted">
+        Where this file goes: straight to the confidential enclave that runs
+        the check. We do not store it. What comes back is the verdict — pass or
+        fail, with a short note on why — never the document itself.
+      </p>
+
       <input
         ref={inputRef}
         type="file"
