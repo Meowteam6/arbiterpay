@@ -38,7 +38,27 @@
 //
 //   On any validation failure: HTTP 400 { error: string }. Never crash.
 //
+// WHY THE LIMITS (added when this repo went public):
+//   The Blink Web SDK cannot hold the merchant key, so this endpoint is
+//   unauthenticated by design: anybody can POST to it and get back a payload
+//   signed with the merchant key. That is only safe if a signed payload is
+//   worthless to whoever obtains it, so the route now refuses to sign anything
+//   except a deposit INTO our own merchant address, in our own token, on Base
+//   Sepolia, under a hard amount ceiling. Before this it would sign an
+//   arbitrary amount to an arbitrary destination on an arbitrary chain, which
+//   turned the merchant key into a general-purpose authorization oracle.
+//   The limits and their tests live in app/lib/money-guards.ts.
+//
 // ENV (server-only — never NEXT_PUBLIC):
+//   BLINK_MERCHANT_ADDRESS      Base Sepolia address that receives deposits.
+//                               The ONLY destination this route will sign for.
+//                               Falls back to NEXT_PUBLIC_BLINK_MERCHANT_ADDRESS
+//                               (the client copy of the same value).
+//   NEXT_PUBLIC_BLINK_USDC_ADDRESS
+//                               Base Sepolia USDC token address. The ONLY
+//                               token this route will sign for. Public by
+//                               nature (the browser needs it to build the
+//                               deposit), read here as an allowlist.
 //   BLINK_MERCHANT_PRIVATE_KEY  PEM PKCS8 ECDSA P-256 (prime256v1 / secp256r1)
 //                               private key. Generate during Blink sandbox
 //                               merchant registration with:
@@ -56,8 +76,13 @@
 //                               Returned to the SDK; not part of signed bytes.
 
 import { createSign, randomUUID } from "node:crypto";
-import { requireEnv } from "@/lib/server/env";
-import { errorMessage, jsonError, readJsonBody } from "@/lib/server/http";
+import { optionalEnv, requireEnv } from "@/lib/server/env";
+import { jsonError, readJsonBody } from "@/lib/server/http";
+import {
+  checkBlinkDeposit,
+  serverFailure,
+  type BlinkDepositLimits,
+} from "@/lib/money-guards";
 
 // node:crypto + PEM key signing requires the Node.js runtime; the Edge runtime
 // cannot run createSign over a PEM key.
@@ -104,6 +129,32 @@ interface BlinkSignResponse {
 // ------------------------------------------------------------------- validation
 
 const HEX_ADDRESS = /^0x[0-9a-fA-F]{40}$/;
+
+const SCOPE = "api/blink/sign";
+
+/**
+ * The single destination and token this route will ever sign for. Resolved per
+ * request so a config change does not need a redeploy, and so a missing value
+ * is a loud 500 rather than an accidentally permissive signer.
+ */
+function depositLimits(): BlinkDepositLimits {
+  const merchantAddress = optionalEnv(
+    "BLINK_MERCHANT_ADDRESS",
+    optionalEnv("NEXT_PUBLIC_BLINK_MERCHANT_ADDRESS", ""),
+  );
+  if (!HEX_ADDRESS.test(merchantAddress)) {
+    throw new Error(
+      "Missing or malformed BLINK_MERCHANT_ADDRESS. The signer refuses to run without a pinned destination.",
+    );
+  }
+  const tokenAddress = requireEnv("NEXT_PUBLIC_BLINK_USDC_ADDRESS");
+  if (!HEX_ADDRESS.test(tokenAddress)) {
+    throw new Error(
+      "Malformed NEXT_PUBLIC_BLINK_USDC_ADDRESS. The signer refuses to run without a pinned token.",
+    );
+  }
+  return { merchantAddress, tokenAddress };
+}
 
 /**
  * Validate and narrow the SDK-supplied body into a BlinkSignRequest. Throws a
@@ -193,25 +244,41 @@ export async function POST(request: Request): Promise<Response> {
     // with the missing variable name rather than signing with a bad key.
     let privateKeyPem: string;
     let merchantId: string;
+    let limits: BlinkDepositLimits;
     try {
       privateKeyPem = normalizePem(requireEnv("BLINK_MERCHANT_PRIVATE_KEY"));
       merchantId = requireEnv("BLINK_MERCHANT_ID");
+      limits = depositLimits();
     } catch (err) {
-      return jsonError(500, errorMessage(err));
+      // The message names env vars, so it goes to the log, not to the caller.
+      return serverFailure(SCOPE, err, {
+        message: "The deposit signer is not configured.",
+      });
     }
 
     let body: Record<string, unknown>;
     try {
       body = await readJsonBody(request);
-    } catch (err) {
-      return jsonError(400, errorMessage(err));
+    } catch {
+      return jsonError(400, "Body must be a JSON object.");
     }
 
     let req: BlinkSignRequest;
     try {
       req = parseSignRequest(body);
     } catch (err) {
-      return jsonError(400, errorMessage(err));
+      // Shape errors are the caller's own input, safe to echo back.
+      return jsonError(
+        400,
+        err instanceof Error ? err.message : "Malformed deposit request",
+      );
+    }
+
+    // Refuse anything the merchant key must not authorize. A signed payload is
+    // then only ever good for depositing into our own merchant address.
+    const violation = checkBlinkDeposit(req, limits);
+    if (violation !== null) {
+      return jsonError(400, violation);
     }
 
     const idempotencyKey = randomUUID();
@@ -235,11 +302,11 @@ export async function POST(request: Request): Promise<Response> {
       signed = signPayload(payloadObject, privateKeyPem);
     } catch (err) {
       // A bad PEM or unsupported key curve surfaces here. This is a server
-      // configuration fault, not bad client input.
-      return jsonError(
-        500,
-        `Failed to sign deposit payload: ${errorMessage(err)}`,
-      );
+      // configuration fault, not bad client input, and the message would
+      // describe our key material.
+      return serverFailure(SCOPE, err, {
+        message: "Could not sign the deposit payload.",
+      });
     }
 
     const response: BlinkSignResponse = {
@@ -258,6 +325,6 @@ export async function POST(request: Request): Promise<Response> {
     return Response.json(response);
   } catch (err) {
     // Last-resort guard — the signer must never crash the request.
-    return jsonError(500, errorMessage(err));
+    return serverFailure(SCOPE, err);
   }
 }
