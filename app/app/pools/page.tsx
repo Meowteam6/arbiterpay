@@ -39,6 +39,7 @@ import {
   providerQueryKey,
 } from "@/lib/wearable-provider";
 import { useEmbeddedWallet } from "@/lib/wallet";
+import { useWalletAuth } from "@/lib/useWalletAuth";
 
 function PoolGrid({ pools, phase }: { pools: PoolInfo[]; phase: PoolPhase }) {
   return (
@@ -52,6 +53,7 @@ function PoolGrid({ pools, phase }: { pools: PoolInfo[]; phase: PoolPhase }) {
 
 export default function PoolsPage() {
   const { address } = useEmbeddedWallet();
+  const requestAuth = useWalletAuth();
 
   // The clock is read alongside the fetch, not during render, so grouping
   // stays pure and every card is classified against one snapshot. The query
@@ -97,11 +99,17 @@ export default function PoolsPage() {
   // Shares one query key with the dashboard and the pool page: same endpoint,
   // one request per address. Without a wallet there is nobody to ask about, so
   // the check stays disabled and nothing is held back on a guess.
+  //
+  // cachedOnly: browsing a list of pools is not a request to unlock private
+  // data, so this never opens a wallet prompt. Unsigned reads report as "not
+  // known", which leaves every goal on the board.
   const providerQuery = useQuery({
     queryKey: providerQueryKey(address),
     queryFn: () => {
       if (address === null) throw new Error("No wallet connected.");
-      return fetchProviderState(address);
+      return fetchProviderState(address, (options) =>
+        requestAuth({ ...options, cachedOnly: true }),
+      );
     },
     enabled: address !== null,
     retry: false,

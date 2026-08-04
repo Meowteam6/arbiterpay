@@ -1,5 +1,6 @@
 // POST /api/agent/run/[goalId] - drive SPOTTER's run loop for one claim.
-// GET  /api/agent/run/[goalId] - read the claim's public money facts.
+// GET  /api/agent/run/[goalId] - read the claim: money facts for anyone, the
+//      full ledger for the wallet that owns it.
 //
 // The browser polls POST after submitting evidence; each poll resumes the run
 // wherever it stopped (the ledger carries the state). Unauthenticated by
@@ -36,19 +37,42 @@
 // must NOT send one: the evidence is the pool-period Junction summary, so the
 // server synthesizes the ref `wearable-${periodStart}` from the chain itself -
 // a caller-supplied ref could split one claim across two ledger keys.
-// Response JSON: { status, ledger } (see RunStatus in agent/run.ts)
+// Response JSON: { status, claim, hasLedger, ledger } - status is the
+// RunStatus in agent/run.ts; ledger is non-null only for a proven owner (see
+// below). GET answers the same minus `status`.
 //
-// GET is the read side, and it is redacted. The full ledger carries
-// model-authored prose about someone's medical document - verdict reasons,
-// decision notes, the goal text itself - and this endpoint is unauthenticated
-// while /api/agent/feed hands out goal ids. It returns the same public
-// projection the feed does: money facts and machine states only.
+// WHO SEES THE LEDGER
+//
+// The full ledger carries model-authored prose about someone's medical
+// document - verdict reasons, decision notes, the goal text itself - and
+// /api/agent/feed hands out the goal ids needed to ask for it. A goalId is
+// therefore not a credential, and neither is an address in the body: both are
+// public. Ownership is proven by an EIP-191 signature over the wallet-auth
+// message (lib/server/wallet-auth.ts).
+//
+// Both verbs answer the same way (lib/server/agent/claim-access.ts):
+//   - a caller who proves control of the claim's participant address gets the
+//     full ledger, which is what makes a returning user's receipt come back;
+//   - everyone else gets the redacted projection the public feed serves -
+//     money facts and machine states, no prose.
+// The redaction is never a reason to refuse the request: an unsigned caller
+// still learns whether a claim exists, so the UI can say "sign to see this
+// claim" instead of showing a blank upload box over work already done.
+//
+// The signature does NOT gate the run itself. The loop stays idempotent,
+// spend-capped and verdict-gated, so a missing signature costs the caller
+// visibility, never money.
 
-import { isAddress, type Address, type Hex } from "viem";
+import { getAddress, isAddress, type Address, type Hex } from "viem";
 import { evidenceTypeOf } from "@/lib/contract";
 import { runAgentForGoal, type RunDeps } from "@/lib/server/agent/run";
-import { readLedger } from "@/lib/server/agent/ledger";
-import { toPublicFeedClaim } from "@/lib/server/agent/feed-view";
+import { readLedger, type LedgerEntry } from "@/lib/server/agent/ledger";
+import {
+  claimParticipantOf,
+  isClaimOwner,
+  projectClaimForCaller,
+  type ClaimAccess,
+} from "@/lib/server/agent/claim-access";
 import { getCircleClient } from "@/lib/server/agent/wallet";
 import { arcReader, type ArcReader } from "@/lib/server/agent/spotter";
 import { liveBuyDeps } from "@/lib/server/agent/x402";
@@ -69,6 +93,7 @@ import {
   readJsonBody,
   safeError,
 } from "@/lib/server/http";
+import { authenticateWallet } from "@/lib/server/wallet-auth";
 
 // A run can hold a Circle transaction poll plus two RPC inclusion waits;
 // Vercel's default function window cuts that off mid-settlement.
@@ -94,7 +119,51 @@ function liveDeps(
 
 type Ctx = { params: Promise<{ goalId: string }> };
 
-export async function GET(_request: Request, ctx: Ctx) {
+/**
+ * Fallback ownership proof for ledgers written before the plan entry carried
+ * its participant: the chain derives goalId from (poolId, participant), so a
+ * signer whose address hashes to THIS goal id under the caller's poolId is
+ * this claim's participant. The poolId is untrusted input and needs to be -
+ * getting it wrong only fails the comparison. An RPC failure fails closed.
+ */
+async function ownsGoalOnChain(
+  request: Request,
+  goalId: string,
+  signer: Address,
+): Promise<"yes" | "no" | "unknown"> {
+  const poolId = new URL(request.url).searchParams.get("poolId");
+  if (poolId === null || !/^\d+$/.test(poolId)) return "unknown";
+  try {
+    const derived = await computeGoalId(BigInt(poolId), signer);
+    return derived.toLowerCase() === goalId.toLowerCase() ? "yes" : "no";
+  } catch (err) {
+    // A dead RPC withholds the ledger, as it must - but it is NOT evidence
+    // that the caller is somebody else, and the copy downstream depends on
+    // that difference.
+    console.error("[agent-run] chain ownership check failed", err);
+    return "unknown";
+  }
+}
+
+/** How the caller was classified for a GET. The ledger's own record of its
+ *  participant is preferred; the chain is asked only for ledgers written
+ *  before that field existed. */
+async function accessForGet(
+  request: Request,
+  goalId: string,
+  ledger: LedgerEntry[],
+  viewer: Address | null,
+): Promise<ClaimAccess> {
+  if (isClaimOwner(ledger, viewer)) return "owner";
+  if (viewer === null) return "unproven";
+  if (claimParticipantOf(ledger) !== null) return "not-owner";
+  if (ledger.length === 0) return "unproven";
+  const onChain = await ownsGoalOnChain(request, goalId, viewer);
+  if (onChain === "yes") return "owner";
+  return onChain === "no" ? "not-owner" : "unproven";
+}
+
+export async function GET(request: Request, ctx: Ctx) {
   const cid = newCorrelationId("agent-run-get");
   try {
     const { goalId } = await ctx.params;
@@ -102,11 +171,16 @@ export async function GET(_request: Request, ctx: Ctx) {
       return jsonError(400, "goalId must be a 0x-prefixed bytes32 hex string");
     }
     const ledger = await readLedger(goalId);
-    // Same redaction the public feed applies. An empty ledger projects to a
-    // claim with nothing in it, which is exactly what an unknown goal is.
-    return Response.json({
-      claim: toPublicFeedClaim(goalId, ledger[0]?.at ?? "", ledger),
-    });
+
+    // An unsigned or invalid-signature caller is not an error here: they get
+    // the redacted view, exactly as before this route learned about owners.
+    const auth = await authenticateWallet(request);
+    const viewer = auth.ok ? auth.address : null;
+    const access = await accessForGet(request, goalId, ledger, viewer);
+
+    // An empty ledger projects to a claim with nothing in it, which is
+    // exactly what an unknown goal is.
+    return Response.json(projectClaimForCaller({ goalId, ledger, access }));
   } catch (err) {
     return jsonError(500, safeError(err, cid));
   }
@@ -238,6 +312,19 @@ export async function POST(request: Request, ctx: Ctx) {
       poll = pollInference;
     }
 
+    // Ownership for the RESPONSE only, never for the run. The derived-goalId
+    // check above already proved this goal belongs to (poolId, address), so a
+    // signature over that same address proves the caller is its participant.
+    // Verified before the run so a run that throws cannot skip it. A valid
+    // signature for a DIFFERENT wallet is reported as such, so the browser can
+    // say "wrong wallet" without having to guess it from a missing ledger.
+    const auth = await authenticateWallet(request);
+    const access: ClaimAccess = !auth.ok
+      ? "unproven"
+      : auth.address === getAddress(address)
+        ? "owner"
+        : "not-owner";
+
     const result = await runAgentForGoal(liveDeps(reader, poll), {
       goalId: goalId as Hex,
       poolId: BigInt(poolId),
@@ -246,7 +333,10 @@ export async function POST(request: Request, ctx: Ctx) {
       attesterId,
       evidenceKind,
     });
-    return Response.json(result);
+    return Response.json({
+      status: result.status,
+      ...projectClaimForCaller({ goalId, ledger: result.ledger, access }),
+    });
   } catch (err) {
     // Last-resort guard - the route must never crash, and must never hand the
     // caller the underlying failure text.

@@ -12,12 +12,21 @@
 //   - an attesterId is only accepted for the claim that submitted it. Pool
 //     members share one goalSpec, so a leaked job id would otherwise let one
 //     member be paid off another member's evidence.
-//   - the GET side is redacted: model prose about a medical document never
-//     leaves the server on an unauthenticated endpoint.
+//   - both verbs are redacted for anyone who cannot PROVE they own the claim.
+//     Model prose about a medical document leaves the server only for a caller
+//     who signs as the claim's participant; a goalId is published by
+//     /api/agent/feed and an address is public on chain, so neither is a
+//     credential. The owner still gets the full ledger, because a returning
+//     user staring at a blank upload box over a claim they already paid for is
+//     the regression that redaction caused.
 //   - a thrown failure reaches the caller as a reference, not as its text.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { promises as fs } from "fs";
+import path from "path";
 import { ContractFunctionRevertedError } from "viem";
+import { privateKeyToAccount } from "viem/accounts";
+import { walletAuthMessage } from "@/lib/server/wallet-auth";
 
 const runAgentForGoal = vi.fn();
 const computeGoalId = vi.fn();
@@ -67,7 +76,44 @@ const { rememberAttesterJob } = await import("@/lib/server/evidence");
 const { GET, POST } = await import("@/app/api/agent/run/[goalId]/route");
 
 const GOAL = "0x" + "ab".repeat(32);
-const USER = "0x8ba1f109551bD432803012645Ac136ddd64DBA72";
+// A real key, because the ownership proof is a real signature: the test has to
+// sign exactly the way a wallet does or it proves nothing.
+const USER_ACCOUNT = privateKeyToAccount(
+  "0xac0974bec39a17e36ba4a6b4d238ff944bacb478cbed5efcae784d7bf4f2ff80",
+);
+const USER = USER_ACCOUNT.address;
+const STRANGER_ACCOUNT = privateKeyToAccount(
+  "0x59c6995e998f97a5a0044966f0945389dc9e86dae88c7a8412f4603b6b78690d",
+);
+
+/** The three headers a signed browser request carries. */
+async function signedHeaders(
+  account: typeof USER_ACCOUNT,
+  address: string = account.address,
+  signedAtMs: number = Date.now(),
+): Promise<Record<string, string>> {
+  const timestamp = new Date(signedAtMs).toISOString();
+  return {
+    "x-gohealthme-address": address,
+    "x-gohealthme-timestamp": timestamp,
+    "x-gohealthme-signature": await account.signMessage({
+      message: walletAuthMessage(address, timestamp),
+    }),
+  };
+}
+
+/** The store file behind one claim's ledger, so a plan entry (one per goal,
+ *  ever) can be re-seeded on every run. */
+async function resetLedger(goalId: string): Promise<void> {
+  const dir = process.env.DATA_DIR;
+  if (dir === undefined) throw new Error("DATA_DIR must be set for this test");
+  await fs.rm(path.join(dir, `agent-ledger-${goalId.toLowerCase()}.jsonl`), {
+    force: true,
+  });
+  await fs.rm(path.join(dir, `agent-ledger-${goalId.toLowerCase()}.json`), {
+    force: true,
+  });
+}
 
 /** The goal the sponsor actually funded. */
 const CHAIN_DOC_GOAL = "[doc] get a flu shot this season";
@@ -94,15 +140,27 @@ function ctx(goalId: string) {
   return { params: Promise.resolve({ goalId }) };
 }
 
-function post(goalId: string, body: Record<string, unknown>) {
+function post(
+  goalId: string,
+  body: Record<string, unknown>,
+  headers: Record<string, string> = {},
+) {
   return POST(
     new Request(`http://localhost/api/agent/run/${goalId}`, {
       method: "POST",
-      headers: { "content-type": "application/json" },
+      headers: { "content-type": "application/json", ...headers },
       body: JSON.stringify(body),
     }),
     ctx(goalId),
   );
+}
+
+function get(
+  goalId: string,
+  options: { headers?: Record<string, string>; query?: string } = {},
+) {
+  const url = `http://localhost/api/agent/run/${goalId}${options.query ?? ""}`;
+  return GET(new Request(url, { headers: options.headers ?? {} }), ctx(goalId));
 }
 
 const GOOD_BODY = {
@@ -146,19 +204,21 @@ describe("POST /api/agent/run/[goalId]", () => {
     expect(runAgentForGoal).not.toHaveBeenCalled();
   });
 
-  it("runs the agent and returns its status and ledger", async () => {
+  it("runs the agent and returns its status, with the ledger for its owner", async () => {
     runAgentForGoal.mockResolvedValue({
       status: "paid",
-      ledger: [{ kind: "plan" }],
+      ledger: [{ kind: "plan", participant: USER }],
     });
 
-    const res = await post(GOAL, GOOD_BODY);
+    const res = await post(GOAL, GOOD_BODY, await signedHeaders(USER_ACCOUNT));
 
     expect(res.status).toBe(200);
-    expect(await res.json()).toEqual({
-      status: "paid",
-      ledger: [{ kind: "plan" }],
-    });
+    const body = (await res.json()) as {
+      status: string;
+      ledger: unknown[] | null;
+    };
+    expect(body.status).toBe("paid");
+    expect(body.ledger).toEqual([{ kind: "plan", participant: USER }]);
     const input = runAgentForGoal.mock.calls[0][1] as {
       poolId: bigint;
       goalId: string;
@@ -318,6 +378,80 @@ describe("POST /api/agent/run/[goalId]", () => {
     expect(runAgentForGoal).not.toHaveBeenCalled();
   });
 
+  it("withholds the ledger from an unsigned caller but still runs", async () => {
+    // The run stays permissionless on purpose - it is idempotent, capped and
+    // verdict-gated - so an unsigned poll costs visibility, never money.
+    runAgentForGoal.mockResolvedValue({
+      status: "no-pay",
+      ledger: [
+        { kind: "plan", participant: USER },
+        {
+          kind: "reason",
+          decision: "no-pay",
+          note: "the scan shows no immunisation on the stated date",
+        },
+      ],
+    });
+
+    const res = await post(GOAL, GOOD_BODY);
+
+    expect(res.status).toBe(200);
+    expect(runAgentForGoal).toHaveBeenCalled();
+    const text = await res.text();
+    expect(text).not.toMatch(/immunisation/i);
+    const body = JSON.parse(text) as {
+      status: string;
+      ledger: unknown;
+      hasLedger: boolean;
+      claim: { decision: string | null };
+    };
+    expect(body.status).toBe("no-pay");
+    expect(body.ledger).toBeNull();
+    expect(body.hasLedger).toBe(true);
+    expect(body.claim.decision).toBe("no-pay");
+  });
+
+  it("withholds the ledger from a caller who signed as somebody else", async () => {
+    runAgentForGoal.mockResolvedValue({
+      status: "paid",
+      ledger: [{ kind: "plan", participant: USER }],
+    });
+
+    // A valid signature over the stranger's own address: proof of control of
+    // a wallet, which is not the same thing as proof of THIS claim.
+    const res = await post(
+      GOAL,
+      GOOD_BODY,
+      await signedHeaders(STRANGER_ACCOUNT),
+    );
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ledger: unknown; access: string };
+    expect(body.ledger).toBeNull();
+    expect(body.access).toBe("not-owner");
+  });
+
+  it("withholds the ledger when the signature is stale", async () => {
+    runAgentForGoal.mockResolvedValue({
+      status: "paid",
+      ledger: [{ kind: "plan", participant: USER }],
+    });
+    // Signed correctly, an hour ago: a leaked header set has a ten minute
+    // life, not an unlimited one.
+    const stale = await signedHeaders(
+      USER_ACCOUNT,
+      USER,
+      Date.now() - 60 * 60 * 1000,
+    );
+
+    const res = await post(GOAL, GOOD_BODY, stale);
+
+    const body = (await res.json()) as { ledger: unknown; access: string };
+    expect(body.ledger).toBeNull();
+    // Expiry is recoverable and must not read as the wrong wallet.
+    expect(body.access).toBe("unproven");
+  });
+
   it("never hands the caller the text of a server-side failure", async () => {
     runAgentForGoal.mockRejectedValue(
       new Error("ECONNREFUSED https://rpc.internal:8545 signer 0xdeadbeef"),
@@ -331,20 +465,45 @@ describe("POST /api/agent/run/[goalId]", () => {
 });
 
 describe("GET /api/agent/run/[goalId]", () => {
+  const OWNED = `0x${"7e".repeat(32)}`;
+  const PROSE_REASON =
+    "the record shows a quadrivalent influenza vaccine on 2026-03-02";
+  const PROSE_NOTE =
+    "the enclave read the immunisation record and it matches the goal";
+
+  /** A claim owned by USER, seeded the way the run loop writes it. */
+  async function seedOwnedClaim(participant?: string): Promise<void> {
+    await resetLedger(OWNED);
+    await appendLedger(OWNED, {
+      kind: "plan",
+      steps: [{ service: "attester-read", label: "TEE read", estUsd: "0.10" }],
+      capUsd: "1.00",
+      poolId: "7",
+      ...(participant !== undefined ? { participant } : {}),
+    });
+    await appendLedger(OWNED, {
+      kind: "verdict",
+      verified: true,
+      confidence: "high",
+      reason: PROSE_REASON,
+      ref: "att-1",
+    });
+    await appendLedger(OWNED, {
+      kind: "reason",
+      decision: "pay",
+      note: PROSE_NOTE,
+      ref: "att-1",
+    });
+  }
+
   it("rejects a malformed goalId", async () => {
-    const res = await GET(
-      new Request(`http://localhost/api/agent/run/xyz`),
-      ctx("xyz"),
-    );
+    const res = await get("xyz");
     expect(res.status).toBe(400);
   });
 
   it("returns an empty public claim for a goal with no ledger", async () => {
     const empty = `0x${"11".repeat(32)}`;
-    const res = await GET(
-      new Request(`http://localhost/api/agent/run/${empty}`),
-      ctx(empty),
-    );
+    const res = await get(empty);
     expect(res.status).toBe(200);
     expect(await res.json()).toEqual({
       claim: {
@@ -355,37 +514,177 @@ describe("GET /api/agent/run/[goalId]", () => {
         recordTxs: null,
         settle: null,
       },
+      access: "unproven",
+      hasLedger: false,
+      ledger: null,
     });
   });
 
   it("never leaks verdict prose, decision notes or the goal text", async () => {
-    // A fixed id, and only entries the ledger lets you append repeatedly, so
-    // a re-run duplicates rows in one file rather than littering the store.
-    const goalId = `0x${"7e".repeat(32)}`;
-    await appendLedger(goalId, {
-      kind: "verdict",
-      verified: true,
-      confidence: "high",
-      reason: "the record shows a quadrivalent influenza vaccine on 2026-03-02",
-      ref: "att-1",
-    });
-    await appendLedger(goalId, {
-      kind: "reason",
-      decision: "pay",
-      note: "the enclave read the immunisation record and it matches the goal",
-      ref: "att-1",
-    });
+    await seedOwnedClaim(USER);
 
-    const res = await GET(
-      new Request(`http://localhost/api/agent/run/${goalId}`),
-      ctx(goalId),
-    );
+    const res = await get(OWNED);
 
     expect(res.status).toBe(200);
     const text = await res.text();
     expect(text).not.toMatch(/influenza|immunisation|quadrivalent/i);
-    const body = JSON.parse(text) as { claim: { decision: string | null } };
+    const body = JSON.parse(text) as {
+      claim: { decision: string | null };
+      hasLedger: boolean;
+      ledger: unknown;
+    };
     // The machine state still crosses; only the prose behind it does not.
     expect(body.claim.decision).toBe("pay");
+    expect(body.ledger).toBeNull();
+    // A withheld claim must still say it exists, or the browser shows an
+    // upload box over work the user already paid for.
+    expect(body.hasLedger).toBe(true);
+  });
+
+  it("hands the full ledger to the participant who signs for it", async () => {
+    await seedOwnedClaim(USER);
+
+    const res = await get(OWNED, { headers: await signedHeaders(USER_ACCOUNT) });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ledger: { kind: string }[] | null };
+    expect(body.ledger).not.toBeNull();
+    expect(body.ledger?.map((e) => e.kind)).toEqual([
+      "plan",
+      "verdict",
+      "reason",
+    ]);
+    expect(JSON.stringify(body.ledger)).toContain(PROSE_REASON);
+  });
+
+  it("refuses a stranger who proves control of their own wallet", async () => {
+    await seedOwnedClaim(USER);
+
+    const res = await get(OWNED, {
+      headers: await signedHeaders(STRANGER_ACCOUNT),
+    });
+
+    const text = await res.text();
+    expect(text).not.toMatch(/influenza|immunisation/i);
+    const body = JSON.parse(text) as { ledger: unknown; access: string };
+    expect(body.ledger).toBeNull();
+    // Definitively somebody else, and said so: this is the ONE case where the
+    // browser may tell a person the claim belongs to another wallet.
+    expect(body.access).toBe("not-owner");
+  });
+
+  it("calls an expired signature unproven, not somebody else's claim", async () => {
+    // The difference the copy hangs on. An owner whose signature aged out (or
+    // whose clock drifted) must be told to sign again, never that their own
+    // claim belongs to a stranger.
+    await seedOwnedClaim(USER);
+
+    const res = await get(OWNED, {
+      headers: await signedHeaders(
+        USER_ACCOUNT,
+        USER,
+        Date.now() - 60 * 60 * 1000,
+      ),
+    });
+
+    expect(((await res.json()) as { access: string }).access).toBe("unproven");
+  });
+
+  it("calls an unsigned read unproven", async () => {
+    await seedOwnedClaim(USER);
+    const res = await get(OWNED);
+    expect(((await res.json()) as { access: string }).access).toBe("unproven");
+  });
+
+  it("reports the owner as the owner", async () => {
+    await seedOwnedClaim(USER);
+    const res = await get(OWNED, { headers: await signedHeaders(USER_ACCOUNT) });
+    expect(((await res.json()) as { access: string }).access).toBe("owner");
+  });
+
+  it("refuses a caller who names the owner's address without signing as it", async () => {
+    // The whole point: an address is public. Claiming it in a header proves
+    // nothing without the matching signature.
+    await seedOwnedClaim(USER);
+
+    const res = await get(OWNED, {
+      headers: await signedHeaders(STRANGER_ACCOUNT, USER),
+    });
+
+    expect((await res.json() as { ledger: unknown }).ledger).toBeNull();
+  });
+
+  it("refuses a signature that has aged out", async () => {
+    await seedOwnedClaim(USER);
+
+    const res = await get(OWNED, {
+      headers: await signedHeaders(
+        USER_ACCOUNT,
+        USER,
+        Date.now() - 60 * 60 * 1000,
+      ),
+    });
+
+    expect((await res.json() as { ledger: unknown }).ledger).toBeNull();
+  });
+
+  it("falls back to the chain for a ledger written before the plan named its participant", async () => {
+    // Older claims carry no participant, and their owners must not be locked
+    // out of their own receipts. computeGoalId(poolId, signer) === goalId is
+    // the chain's own statement that this wallet is the claim's participant.
+    await seedOwnedClaim(undefined);
+    computeGoalId.mockResolvedValue(OWNED);
+
+    const res = await get(OWNED, {
+      headers: await signedHeaders(USER_ACCOUNT),
+      query: "?poolId=7",
+    });
+
+    const body = (await res.json()) as { ledger: unknown[] | null };
+    expect(body.ledger).not.toBeNull();
+    expect(computeGoalId).toHaveBeenCalledWith(7n, USER);
+  });
+
+  it("does not let the chain fallback pass for a different goal", async () => {
+    await seedOwnedClaim(undefined);
+    computeGoalId.mockResolvedValue(`0x${"cd".repeat(32)}`);
+
+    const res = await get(OWNED, {
+      headers: await signedHeaders(USER_ACCOUNT),
+      query: "?poolId=7",
+    });
+
+    const body = (await res.json()) as { ledger: unknown; access: string };
+    expect(body.ledger).toBeNull();
+    // The chain answered and the answer was no, so this one IS somebody else.
+    expect(body.access).toBe("not-owner");
+  });
+
+  it("fails closed when the chain read for the fallback throws", async () => {
+    await seedOwnedClaim(undefined);
+    computeGoalId.mockRejectedValue(new Error("rpc down"));
+
+    const res = await get(OWNED, {
+      headers: await signedHeaders(USER_ACCOUNT),
+      query: "?poolId=7",
+    });
+
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { ledger: unknown; access: string };
+    expect(body.ledger).toBeNull();
+    // Withheld, but NOT evidence that the caller is somebody else: a dead RPC
+    // must not turn into "this claim belongs to a different wallet".
+    expect(body.access).toBe("unproven");
+  });
+
+  it("never asks the chain when the ledger already names its participant", async () => {
+    await seedOwnedClaim(USER);
+
+    await get(OWNED, {
+      headers: await signedHeaders(USER_ACCOUNT),
+      query: "?poolId=7",
+    });
+
+    expect(computeGoalId).not.toHaveBeenCalled();
   });
 });
