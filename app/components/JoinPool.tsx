@@ -1,7 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState } from "react";
-import Link from "next/link";
+import { useRef, useState } from "react";
 import { useQueryClient } from "@tanstack/react-query";
 import { arcTxUrl } from "@/lib/chains";
 import { DYNAMIC_CONFIGURED } from "@/lib/config";
@@ -20,6 +19,7 @@ import {
   type HumanTxError,
 } from "@/lib/tx-errors";
 import { ErrorNote } from "@/components/ui";
+import FundingHelp from "@/components/FundingHelp";
 
 type JoinStatus =
   | { kind: "idle" }
@@ -41,19 +41,17 @@ function JoinPoolInner({
   const { ready, authenticated, address, login, getArcWalletClient } =
     useEmbeddedWallet();
   const queryClient = useQueryClient();
-  const [status, setStatus] = useState<JoinStatus>(
-    alreadyJoined ? { kind: "joined", txHash: null } : { kind: "idle" },
-  );
+  const [rawStatus, setStatus] = useState<JoinStatus>({ kind: "idle" });
 
   // The on-chain participant read resolves async and after refresh. If it
   // confirms we are already a participant, show "You are in" instead of the
   // join button -- never clobber an in-flight join or a fresh success that
-  // already carries its tx hash.
-  useEffect(() => {
-    if (alreadyJoined) {
-      setStatus((s) => (s.kind === "idle" ? { kind: "joined", txHash: null } : s));
-    }
-  }, [alreadyJoined]);
+  // already carries its tx hash. Derived, not an effect: the prop is the
+  // source of truth and any non-idle local status outranks it.
+  const status: JoinStatus =
+    rawStatus.kind === "idle" && alreadyJoined
+      ? { kind: "joined", txHash: null }
+      : rawStatus;
 
   // Re-entrancy guard. The main join button disables while busy, but the
   // funding card's check-again button renders in a non-busy state, so a
@@ -111,7 +109,17 @@ function JoinPoolInner({
           functionName: "approve",
           args: [poolsAddress, entryFee],
         });
-        await publicClient.waitForTransactionReceipt({ hash: approveHash });
+        // waitForTransactionReceipt resolves once the transaction is MINED and
+        // does not throw on a revert, so "You are in" off a bare await could
+        // link a transaction that joined nobody. Check the status instead.
+        const approveReceipt = await publicClient.waitForTransactionReceipt({
+          hash: approveHash,
+        });
+        if (approveReceipt.status !== "success") {
+          throw new Error(
+            `The USDC approval ${approveHash} reverted on Arc testnet.`,
+          );
+        }
       }
 
       const joinHash = await walletClient.writeContract({
@@ -120,7 +128,14 @@ function JoinPoolInner({
         functionName: "joinPool",
         args: [poolId, nullifier],
       });
-      await publicClient.waitForTransactionReceipt({ hash: joinHash });
+      const joinReceipt = await publicClient.waitForTransactionReceipt({
+        hash: joinHash,
+      });
+      if (joinReceipt.status !== "success") {
+        throw new Error(
+          `The joinPool transaction ${joinHash} reverted on Arc testnet.`,
+        );
+      }
 
       setStatus({ kind: "joined", txHash: joinHash });
       await queryClient.invalidateQueries({ queryKey: ["pool"] });
@@ -158,52 +173,17 @@ function JoinPoolInner({
 
   if (status.kind === "needs-funds") {
     return (
-      <div className="rounded-xl border border-warning/40 bg-warning/10 p-4">
-        <p className="text-base font-semibold text-warning">
-          Your wallet needs USDC before it can join
-        </p>
-        <p className="mt-1 text-sm text-foreground/80">
-          Arc testnet pays gas in USDC, so even a free pool needs a small
-          balance to cover the transaction.
-          {entryFee > 0n
-            ? ` This pool also pulls a ${formatUsdc(entryFee)} USDC entry fee when you join.`
-            : ""}
-          {` Current balance: ${formatUsdc(status.balance)} USDC.`}
-        </p>
-        <p className="mt-3 text-xs font-medium uppercase tracking-wide text-muted">
-          Your wallet address
-        </p>
-        <p className="mt-1 break-all font-mono text-xs text-foreground/80">
-          {address}
-        </p>
-        <div className="mt-3 space-y-1 text-sm text-foreground/80">
-          <p>
-            <a
-              href="https://faucet.circle.com"
-              target="_blank"
-              rel="noopener noreferrer"
-              className="text-accent underline"
-            >
-              Get test USDC from the Circle faucet
-            </a>{" "}
-            and send it to the address above.
-          </p>
-          <p>
-            Or top up in-app from the balance card on{" "}
-            <Link href="/dashboard" className="text-accent underline">
-              your dashboard
-            </Link>
-            .
-          </p>
-        </div>
-        <button
-          type="button"
-          onClick={() => void startJoin()}
-          className="mt-4 w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:opacity-60"
-        >
-          I added USDC, check again
-        </button>
-      </div>
+      <FundingHelp
+        address={address}
+        balance={status.balance}
+        headline="Your wallet needs test USDC before it can join"
+        note={
+          entryFee > 0n
+            ? `This pool also pulls a ${formatUsdc(entryFee)} USDC entry fee when you join.`
+            : undefined
+        }
+        onRecheck={() => void startJoin()}
+      />
     );
   }
 
@@ -232,7 +212,8 @@ function JoinPoolInner({
               : "Sign in to join"}
       </button>
       <p className="text-xs text-muted">
-        One wallet, one entry. No sign-ups, no extra apps.
+        One wallet, one entry. Sign in with an email - the wallet is created
+        for you, no seed phrase and no app to install.
       </p>
       {status.kind === "error" ? (
         <div className="space-y-2">

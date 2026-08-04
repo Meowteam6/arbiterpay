@@ -29,6 +29,7 @@ cre/wf-goal-verification/.cre_build_tmp.js
 # key material and Circle entity-secret recovery files
 *.pem
 *-recovery-file.json
+.gstack/
 
 # local agent-ledger scratch used by e2e runs
 app/.data/

@@ -5,18 +5,18 @@ import { usePathname } from "next/navigation";
 import { DYNAMIC_CONFIGURED } from "@/lib/config";
 import { useEmbeddedWallet } from "@/lib/wallet";
 import AgentStrip from "@/components/AgentStrip";
+import { CopyAddressButton } from "@/components/FundingHelp";
 
+// "Create pool" is deliberately NOT here. It is the sponsor's action - it
+// costs money and a first-time visitor has none - so it lives one level down,
+// as the primary button on /pools. The route is unchanged.
 const NAV_ITEMS: { href: string; label: string }[] = [
   { href: "/pools", label: "Pools" },
   { href: "/agent", label: "SPOTTER" },
   { href: "/dashboard", label: "Dashboard" },
-  { href: "/pools/create", label: "Create pool" },
 ];
 
 function isActive(pathname: string, href: string): boolean {
-  if (href === "/pools") {
-    return pathname === "/pools" || /^\/pools\/(?!create).+/.test(pathname);
-  }
   return pathname === href || pathname.startsWith(`${href}/`);
 }
 
@@ -46,7 +46,7 @@ function NavLinks() {
 }
 
 function AuthControls() {
-  const { ready, authenticated, address, login, logout } = useEmbeddedWallet();
+  const { ready, authenticated, login, logout } = useEmbeddedWallet();
 
   if (!ready) {
     return (
@@ -59,7 +59,7 @@ function AuthControls() {
       <button
         type="button"
         onClick={login}
-        className="rounded-lg bg-accent-strong px-4 py-2 text-sm font-semibold text-background hover:bg-accent"
+        className="min-h-11 rounded-lg bg-accent-strong px-4 py-2 text-sm font-semibold text-background hover:bg-accent"
       >
         Sign in
       </button>
@@ -67,37 +67,78 @@ function AuthControls() {
   }
 
   return (
-    <div className="flex items-center gap-2">
-      {address !== null ? (
-        <button
-          type="button"
-          onClick={() => {
-            void navigator.clipboard?.writeText(address);
-          }}
-          title={`Click to copy ${address}`}
-          className="hidden rounded-lg border border-edge bg-surface-raised px-3 py-2 font-mono text-xs text-muted hover:text-foreground sm:inline"
-        >
-          {address}
-        </button>
-      ) : null}
-      <button
-        type="button"
-        onClick={() => {
-          void logout();
-        }}
-        className="rounded-lg border border-edge px-3 py-2 text-sm font-medium text-muted hover:text-foreground"
-      >
-        Sign out
-      </button>
+    <button
+      type="button"
+      onClick={() => {
+        void logout();
+      }}
+      className="min-h-11 rounded-lg border border-edge px-3 py-2 text-sm font-medium text-muted hover:text-foreground"
+    >
+      Sign out
+    </button>
+  );
+}
+
+/**
+ * Signed out this answers "what is this about to ask me for" before Dynamic's
+ * modal takes over the screen. Signed in it carries the wallet address, which
+ * is the first thing anyone needs: Arc gas is USDC, so funding the wallet at
+ * the faucet starts by copying this.
+ */
+function WalletNote() {
+  const { authenticated, address } = useEmbeddedWallet();
+
+  if (!authenticated) {
+    // Rendered while the SDK is still loading too - that window is exactly
+    // when a first-time visitor is reading the header.
+    return (
+      <p className="py-2 text-xs leading-relaxed text-muted">
+        Sign in with an email address - we create the wallet for you. No seed
+        phrase, no extension, nothing to install.
+      </p>
+    );
+  }
+
+  if (address === null) return null;
+
+  return (
+    <div className="flex items-center gap-2 py-1">
+      <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-muted">
+        Your wallet
+      </span>
+      <CopyAddressButton address={address} compact />
+    </div>
+  );
+}
+
+/**
+ * The row under the header bar. It exists because the 64px bar cannot hold an
+ * address, an explanation, and SPOTTER's balance at 375px without crushing the
+ * nav to nothing. AgentStrip lives here rather than in the bar so it can be
+ * shown on small screens (another surface owns that decision) without taking
+ * space from the nav. Vertical padding sits on the children, so the row
+ * collapses to a hairline when every child renders null.
+ */
+function HeaderNote() {
+  return (
+    <div className="border-t border-edge bg-surface/60">
+      <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-x-3 px-3 sm:px-4">
+        {DYNAMIC_CONFIGURED ? <WalletNote /> : null}
+        <div className="ml-auto shrink-0">
+          <AgentStrip />
+        </div>
+      </div>
     </div>
   );
 }
 
 export default function Header() {
-  // Mobile (375px) cannot fit wordmark + 4 links + auth on one row. The nav
+  // Mobile (375px) cannot fit wordmark + links + auth on one row. The nav
   // links live in their own horizontally scrollable strip (only the nav
   // scrolls, never the page); wordmark and auth stay pinned at the edges.
-  // AgentStrip is already hidden below sm.
+  // Nothing else may be added to this row: the sign-in explanation, the
+  // wallet address, and SPOTTER's balance all live in the row underneath, so
+  // the nav keeps its width no matter which of them are on screen.
   return (
     <header className="sticky top-0 z-40 border-b border-edge bg-background/90 backdrop-blur">
       <div className="mx-auto flex h-16 max-w-5xl items-center gap-2 px-3 sm:gap-3 sm:px-4">
@@ -113,7 +154,6 @@ export default function Header() {
           </div>
         </nav>
         <div className="flex shrink-0 items-center gap-1 sm:gap-2">
-          <AgentStrip />
           {DYNAMIC_CONFIGURED ? (
             <AuthControls />
           ) : (
@@ -123,6 +163,7 @@ export default function Header() {
           )}
         </div>
       </div>
+      <HeaderNote />
     </header>
   );
 }
