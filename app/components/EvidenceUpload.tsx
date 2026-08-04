@@ -5,6 +5,12 @@
 //   1. Restore on mount - a returning user's ledger comes back from
 //      GET /api/agent/run/[goalId] and renders as the state it encodes,
 //      never as a blank "Prove it." box that hides a claim that already ran.
+//      That read is owner-only now (the ledger carries model prose about the
+//      uploaded document, and goal ids are public), so every request here
+//      carries a wallet signature. One signature covers the whole session -
+//      the run loop polls every 800ms and a prompt per poll is unusable. When
+//      there is no signature the claim is reported as withheld, with the
+//      reason, rather than as absent.
 //   2. Resume, do not restart - the POST run loop is idempotent server-side,
 //      so a mid-flight claim picks up where it stopped, and a deferred
 //      settlement schedules exactly one automatic re-poll for just after the
@@ -31,6 +37,16 @@ import {
   type LedgerEntry,
   type RunStatus,
 } from "@/lib/agent-receipt";
+import { fetchWithWalletAuth } from "@/lib/client-auth";
+import { useWalletAuth } from "@/lib/useWalletAuth";
+import {
+  claimScreenOf,
+  claimVisibilityOf,
+  emptyClaimScreen,
+  nextClaimScreen,
+  receiptToKeep,
+  type ClaimScreen,
+} from "@/lib/claim-restore";
 import AgentReceipt from "@/components/AgentReceipt";
 import Countdown from "@/components/Countdown";
 import PayoutMoment from "@/components/PayoutMoment";
@@ -72,15 +88,29 @@ interface SubmitResponse {
 
 interface RunResponse {
   status?: RunStatus;
+  /** Present only for a caller who proved control of this claim's wallet. */
   ledger?: LedgerEntry[];
+  /** Whether a claim exists at all, regardless of who is asking. */
+  hasLedger?: boolean;
   error?: string;
 }
 
 type UploadStatus =
   | { kind: "idle" }
   | { kind: "submitting" }
-  | { kind: "agent"; runStatus: RunStatus; ledger: LedgerEntry[] }
-  | { kind: "error"; message: string };
+  | {
+      kind: "agent";
+      runStatus: RunStatus;
+      ledger: LedgerEntry[];
+      /** Set when the server withheld the receipt rows for this request. */
+      lockedReason: string | null;
+    }
+  /** A claim exists but cannot be shown without a signature from its wallet. */
+  | { kind: "locked"; reason: string }
+  // ledger carries whatever was already on screen - a transient failure must
+  // not blank a receipt listing money SPOTTER has already spent, because the
+  // upload box in its place invites a second paid attempt on the same claim.
+  | { kind: "error"; message: string; ledger?: LedgerEntry[] };
 
 interface SelectedFile {
   name: string;
@@ -141,6 +171,7 @@ function EvidenceUploadInner({
   goalSpec: string;
 }) {
   const { ready, authenticated, address, login } = useEmbeddedWallet();
+  const requestAuth = useWalletAuth();
   const queryClient = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
   const [selected, setSelected] = useState<SelectedFile | null>(null);
@@ -158,6 +189,11 @@ function EvidenceUploadInner({
   const goalIdRef = useRef<string | null>(null);
   const attesterIdRef = useRef<string | null>(null);
   const repollDoneRef = useRef(false);
+  // What the receipt currently shows. A poll loop starts from this rather than
+  // from nothing, so a failure on its FIRST request (a resumed claim, or the
+  // deferred-settle re-poll firing before the chain is ready) still renders the
+  // rows the user already has.
+  const screenRef = useRef<ClaimScreen>(emptyClaimScreen());
   // Poll-loop generation counter. Each new loop bumps it; a running loop
   // stops silently the moment it is superseded (fresh submit, wallet switch,
   // unmount) so a stale loop can never overwrite a newer claim's screen.
@@ -174,55 +210,75 @@ function EvidenceUploadInner({
   }, []);
 
   /**
-   * Drive SPOTTER's run loop. Every POST resumes it where it stopped and
-   * returns the full ledger; the receipt renders it verbatim. Server-side
-   * dedupe (by attester job id) makes resuming safe: nothing is bought or
-   * recorded twice no matter how often this runs.
+   * Drive SPOTTER's run loop. Every POST resumes it where it stopped and,
+   * for the wallet that owns the claim, returns the full ledger; the receipt
+   * renders it verbatim. Server-side dedupe (by attester job id) makes
+   * resuming safe: nothing is bought or recorded twice no matter how often
+   * this runs. The signature rides along on every poll from the session cache,
+   * so this prompts once, not once per 800ms tick.
    */
   const pollRun = useCallback(
     async (goalId: string, attesterId: string) => {
       if (address === null) return;
       const seq = ++runSeqRef.current;
       let last: RunStatus = "verifying";
+      // Seeded from the screen, never from nothing: rows already shown survive
+      // both a poll that comes back withheld and a poll that fails outright.
+      let screen = screenRef.current;
       for (let attempt = 0; attempt < MAX_POLLS; attempt++) {
         let body: RunResponse;
         try {
-          const res = await fetch(`/api/agent/run/${goalId}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              attesterId,
-              poolId: poolId.toString(),
-              address,
-              goalSpec,
-            }),
-          });
-          body = (await res.json().catch(() => ({}))) as RunResponse;
-          if (!res.ok) {
-            throw new Error(body.error ?? `SPOTTER responded ${res.status}.`);
+          const sent = await fetchWithWalletAuth(
+            `/api/agent/run/${goalId}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                attesterId,
+                poolId: poolId.toString(),
+                address,
+                goalSpec,
+              }),
+            },
+            requestAuth,
+          );
+          body = (await sent.response.json().catch(() => ({}))) as RunResponse;
+          if (!sent.response.ok) {
+            throw new Error(
+              body.error ?? `SPOTTER responded ${sent.response.status}.`,
+            );
           }
+          screen = nextClaimScreen(screen, body, sent.auth);
+          screenRef.current = screen;
         } catch (err) {
           if (runSeqRef.current !== seq) return;
           setStatus({
             kind: "error",
             message:
               err instanceof Error ? err.message : "The agent run failed.",
+            ledger: receiptToKeep(screen),
           });
           return;
         }
 
         if (runSeqRef.current !== seq) return;
 
-        if (body.status === undefined || body.ledger === undefined) {
+        if (body.status === undefined) {
           setStatus({
             kind: "error",
             message: "SPOTTER returned an unexpected response.",
+            ledger: receiptToKeep(screen),
           });
           return;
         }
 
         last = body.status;
-        setStatus({ kind: "agent", runStatus: last, ledger: body.ledger });
+        setStatus({
+          kind: "agent",
+          runStatus: last,
+          ledger: screen.ledger,
+          lockedReason: screen.lockedReason,
+        });
 
         if (TERMINAL.includes(last)) {
           if (last === "paid" || last === "recorded") {
@@ -243,9 +299,10 @@ function EvidenceUploadInner({
           "Verification is taking longer than usual. Nothing is lost — your " +
           "claim is saved. Come back in a few minutes and this page will " +
           "pick up where it left off.",
+        ledger: receiptToKeep(screen),
       });
     },
-    [address, poolId, goalSpec, queryClient],
+    [address, poolId, goalSpec, queryClient, requestAuth],
   );
 
   // Restore on mount and on wallet change (defect M5): once the wallet
@@ -263,21 +320,41 @@ function EvidenceUploadInner({
     void (async () => {
       try {
         const goalId = await fetchGoalId(poolId, address);
-        const res = await fetch(`/api/agent/run/${goalId}`);
-        if (!res.ok) throw new Error(`ledger read responded ${res.status}`);
-        const body = (await res.json().catch(() => ({}))) as RunResponse;
+        const sent = await fetchWithWalletAuth(
+          `/api/agent/run/${goalId}?poolId=${poolId.toString()}`,
+          undefined,
+          requestAuth,
+        );
+        if (!sent.response.ok) {
+          throw new Error(`ledger read responded ${sent.response.status}`);
+        }
+        const body = (await sent.response.json().catch(() => ({}))) as RunResponse;
         if (cancelled) return;
-        const ledger = Array.isArray(body.ledger) ? body.ledger : [];
+        const visibility = claimVisibilityOf(body, sent.auth);
         goalIdRef.current = goalId;
-        attesterIdRef.current = currentAttesterIdOf(ledger);
         repollDoneRef.current = false;
         setRestoredFor(address);
-        if (ledger.length === 0) {
+        if (visibility.kind === "locked") {
+          // A claim exists and is being withheld. Saying "Prove it." here
+          // would invite a second upload of evidence already paid for.
+          attesterIdRef.current = null;
+          screenRef.current = emptyClaimScreen();
+          setStatus({ kind: "locked", reason: visibility.reason });
+          return;
+        }
+        if (visibility.kind === "none") {
+          attesterIdRef.current = null;
+          screenRef.current = emptyClaimScreen();
           setStatus({ kind: "idle" });
           return;
         }
+        const ledger = visibility.ledger;
+        attesterIdRef.current = currentAttesterIdOf(ledger);
+        // The poll loop and every error screen read from here, so the rows
+        // survive a failure on the resumed run's very first request.
+        screenRef.current = claimScreenOf(ledger);
         const runStatus = runStatusFromLedger(ledger) ?? "verifying";
-        setStatus({ kind: "agent", runStatus, ledger });
+        setStatus({ kind: "agent", runStatus, ledger, lockedReason: null });
         if (runStatus === "verifying" && attesterIdRef.current !== null) {
           void pollRun(goalId, attesterIdRef.current);
         }
@@ -294,7 +371,17 @@ function EvidenceUploadInner({
     return () => {
       cancelled = true;
     };
-  }, [ready, address, poolId, restoredFor, pollRun]);
+  }, [ready, address, poolId, restoredFor, pollRun, requestAuth]);
+
+  /** Sign again and re-run the restore. Used from the withheld state: if the
+   *  prompt is refused a second time the restore lands back here with the
+   *  reason, so there is exactly one path and it always tells the truth. */
+  const unlockClaim = () => {
+    void (async () => {
+      await requestAuth({ refresh: true });
+      setRestoredFor(null);
+    })();
+  };
 
   // Deferred settlement (defect B2): the settle entry may carry its own
   // periodEndIso; otherwise read periodEnd from the pool itself. The query
@@ -467,6 +554,60 @@ function EvidenceUploadInner({
     );
   }
 
+  // A run that failed with rows already on screen. The receipt stays: it is
+  // the user's only record that SPOTTER bought verification for this claim,
+  // and the upload box in its place would sell them a second one. The retry
+  // re-reads the claim rather than offering a fresh upload, because the claim
+  // is still there - it was the request that failed, not the run.
+  if (
+    status.kind === "error" &&
+    status.ledger !== undefined &&
+    status.ledger.length > 0
+  ) {
+    return (
+      <div className="space-y-4">
+        <AgentReceipt ledger={status.ledger} />
+        <ErrorNote
+          title="Lost contact with SPOTTER"
+          detail={`${status.message} The receipt above is what already happened and nothing in it is lost.`}
+          onRetry={() => setRestoredFor(null)}
+        />
+      </div>
+    );
+  }
+
+  // A claim exists for this wallet and the server would not hand it over. The
+  // upload box is the one thing this must never be: it reads as "nothing has
+  // happened" and invites a second upload of evidence already paid for.
+  if (status.kind === "locked") {
+    return (
+      <div className="space-y-3">
+        <h3 className="text-lg font-semibold">This claim is private</h3>
+        <div className="rounded-xl border border-accent/40 bg-accent-deep/20 p-4">
+          <p className="text-sm text-foreground/80">{status.reason}</p>
+        </div>
+        {!authenticated || address === null ? (
+          <button
+            type="button"
+            disabled={!ready}
+            onClick={login}
+            className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            Sign in to see this claim
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={unlockClaim}
+            className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent"
+          >
+            Sign and show my claim
+          </button>
+        )}
+      </div>
+    );
+  }
+
   if (status.kind === "agent") {
     // The current attempt's attester id is recovered from the ledger itself
     // (the attester-read purchase always lands before any verdict, decision,
@@ -497,6 +638,26 @@ function EvidenceUploadInner({
         ) : null}
 
         <AgentReceipt ledger={status.ledger} />
+
+        {/* The run keeps going without a signature; only the rows are held
+         *  back. Saying so beats a receipt that silently stops printing. */}
+        {status.lockedReason !== null ? (
+          <div className="rounded-xl border border-accent/40 bg-accent-deep/20 p-4">
+            <p className="text-base font-semibold">
+              The receipt is hidden, not stopped
+            </p>
+            <p className="mt-1 text-sm text-foreground/80">
+              {status.lockedReason} SPOTTER keeps working either way.
+            </p>
+            <button
+              type="button"
+              onClick={unlockClaim}
+              className="mt-3 w-full rounded-xl border border-accent/50 bg-surface-raised px-5 py-3 text-sm font-semibold text-accent hover:bg-accent-deep"
+            >
+              Sign and show the rows
+            </button>
+          </div>
+        ) : null}
 
         {status.runStatus === "verifying" ? (
           <p className="text-sm text-muted">

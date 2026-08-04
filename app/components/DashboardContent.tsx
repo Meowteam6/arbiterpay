@@ -11,10 +11,18 @@
 // flow that cannot succeed. And a verified claim waiting on its pool period
 // used to look identical to one still being judged, with nothing on screen
 // saying when the money arrives - the chain already knows, so the card says it.
+//
+// The two /api/junction/* reads on this page are signature-gated: a streak and
+// a week of sleep hours are health data, and a wallet address is public, so
+// knowing the address is not permission to read them. This is the one surface
+// where a signature prompt on load is the right call - it is the signed-in
+// user's own dashboard, asking for their own data - and one signature covers
+// every read for the session. A refused prompt shows the reason and a way to
+// try again, never an empty card that reads as "you have no wearable".
 
 import Link from "next/link";
 import { useState } from "react";
-import { useQuery } from "@tanstack/react-query";
+import { useQuery, useQueryClient } from "@tanstack/react-query";
 import BalanceCard from "@/components/BalanceCard";
 import Countdown from "@/components/Countdown";
 import { Badge, EmptyState, ErrorNote, Skeleton, TAP_TARGET } from "@/components/ui";
@@ -29,11 +37,18 @@ import {
 } from "@/lib/contract";
 import {
   fetchProviderState,
+  providerAuthReason,
   providerConnected,
   providerDownReason,
   providerQueryKey,
 } from "@/lib/wearable-provider";
 import { useEmbeddedWallet } from "@/lib/wallet";
+import { useWalletAuth } from "@/lib/useWalletAuth";
+import {
+  authBlockReason,
+  fetchWithWalletAuth,
+  type WalletAuthRequester,
+} from "@/lib/client-auth";
 
 interface JoinedPool {
   pool: PoolInfo;
@@ -152,15 +167,29 @@ function StreakCard({
   address: `0x${string}`;
   pool?: PoolInfo;
 }) {
+  const requestAuth = useWalletAuth();
+  const queryClient = useQueryClient();
   const healthQuery = useQuery({
     queryKey: providerQueryKey(address, pool?.id),
-    queryFn: () => fetchProviderState(address, pool),
+    queryFn: () => fetchProviderState(address, requestAuth, pool),
     retry: false,
   });
 
   const state = healthQuery.data;
   const downReason = providerDownReason(state);
+  const authReason = providerAuthReason(state);
   const progress = state?.kind === "ok" ? state.progress : null;
+
+  /** Sign, then re-read every junction card on the page. This button is the
+   *  only place to sign from, so refetching just this card would leave the
+   *  synced-data card below it hidden until a reload. */
+  const unlock = () => {
+    void (async () => {
+      await requestAuth({ refresh: true });
+      await queryClient.invalidateQueries({ queryKey: ["junction-progress"] });
+      await queryClient.invalidateQueries({ queryKey: ["junction-data"] });
+    })();
+  };
 
   return (
     <section className="rounded-2xl border border-edge bg-surface p-5">
@@ -185,6 +214,21 @@ function StreakCard({
           >
             Find a goal you can still prove
           </Link>
+        </>
+      ) : authReason !== null ? (
+        // Locked, not empty. Offering the connect flow here would tell someone
+        // with a linked device to link it again.
+        <>
+          <p className="mt-3 rounded-xl border border-accent/40 bg-accent-deep/20 p-4 text-sm text-foreground/80">
+            {authReason}
+          </p>
+          <button
+            type="button"
+            onClick={unlock}
+            className={`mt-3 rounded-xl bg-accent-strong font-semibold text-background hover:bg-accent ${TAP_TARGET}`}
+          >
+            Sign and show my streak
+          </button>
         </>
       ) : !providerConnected(state) ? (
         <>
@@ -227,26 +271,55 @@ interface RecentData {
   activity: Array<{ date: string; steps: number | null }>;
 }
 
-async function fetchRecentData(address: `0x${string}`): Promise<RecentData> {
-  const res = await fetch(`/api/junction/data?address=${address}`);
-  if (!res.ok) throw new Error(`Recent data feed responded ${res.status}.`);
-  const j = (await res.json()) as Partial<RecentData>;
+/** Per-day sleep and steps are health data, so the read is signed. A 401 is
+ *  reported as its own state: the card is hidden rather than shown empty, and
+ *  the streak card above carries the one call to action. */
+type RecentDataResult =
+  | { kind: "data"; data: RecentData }
+  | { kind: "auth-required"; reason: string };
+
+async function fetchRecentData(
+  address: `0x${string}`,
+  requestAuth: WalletAuthRequester,
+): Promise<RecentDataResult> {
+  const sent = await fetchWithWalletAuth(
+    `/api/junction/data?address=${address}`,
+    undefined,
+    requestAuth,
+  );
+  if (sent.response.status === 401) {
+    return {
+      kind: "auth-required",
+      reason:
+        authBlockReason(sent.auth) ??
+        "Sign with your wallet to see your synced data.",
+    };
+  }
+  if (!sent.response.ok) {
+    throw new Error(`Recent data feed responded ${sent.response.status}.`);
+  }
+  const j = (await sent.response.json()) as Partial<RecentData>;
   return {
-    connected: j.connected === true,
-    sleep: Array.isArray(j.sleep) ? j.sleep : [],
-    activity: Array.isArray(j.activity) ? j.activity : [],
+    kind: "data",
+    data: {
+      connected: j.connected === true,
+      sleep: Array.isArray(j.sleep) ? j.sleep : [],
+      activity: Array.isArray(j.activity) ? j.activity : [],
+    },
   };
 }
 
 /** Shows the latest few days pulled from the linked provider (demo proof). */
 function RecentDataCard({ address }: { address: `0x${string}` }) {
+  const requestAuth = useWalletAuth();
   const recentQuery = useQuery({
     queryKey: ["junction-data", address],
-    queryFn: () => fetchRecentData(address),
+    queryFn: () => fetchRecentData(address, requestAuth),
     retry: false,
   });
 
-  const data = recentQuery.data;
+  const result = recentQuery.data;
+  const data = result?.kind === "data" ? result.data : undefined;
   if (
     recentQuery.isLoading ||
     data === undefined ||
@@ -301,6 +374,7 @@ function RecentDataCard({ address }: { address: `0x${string}` }) {
 
 export default function DashboardContent() {
   const { ready, authenticated, address, login } = useEmbeddedWallet();
+  const requestAuth = useWalletAuth();
 
   const joinedQuery = useQuery({
     queryKey: ["joined-pools", address],
@@ -320,7 +394,7 @@ export default function DashboardContent() {
     queryKey: providerQueryKey(address),
     queryFn: () => {
       if (address === null) throw new Error("No wallet address.");
-      return fetchProviderState(address);
+      return fetchProviderState(address, requestAuth);
     },
     enabled: address !== null,
     retry: false,
@@ -442,7 +516,12 @@ export default function DashboardContent() {
         )}
       </section>
 
-      {wearableConnected || wearablePool !== undefined ? (
+      {/* The locked case earns the card too: a wearable may well be linked
+       *  and simply unreadable until the signature lands, and dropping the
+       *  card would leave nowhere to sign from. */}
+      {wearableConnected ||
+      wearablePool !== undefined ||
+      providerAuthReason(connectionQuery.data) !== null ? (
         <StreakCard address={address} pool={wearablePool} />
       ) : null}
       <RecentDataCard address={address} />

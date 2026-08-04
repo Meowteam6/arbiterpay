@@ -352,7 +352,8 @@ export function failureModeOf(
 
 // ------------------------------------------------ ledger-derived run status
 //
-// GET /api/agent/run/[goalId] returns only { ledger }; a returning session
+// GET /api/agent/run/[goalId] returns the ledger and no status (and only to
+// the wallet that owns the claim - see lib/claim-restore.ts); a returning session
 // must reconstruct the run status the POST loop would have reported. This
 // mirrors the server run loop's return points - keep the two in sync.
 

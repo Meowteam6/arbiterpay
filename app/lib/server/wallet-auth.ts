@@ -36,10 +36,13 @@
 // (ERC-1271) would need an RPC round trip per request; adding that is a
 // deliberate future change, not an accident of this one.
 //
-// USED BY: lib/server/unlink-admin.ts (capability token issuance) and the two
-// /api/junction/* routes. It is intentionally NOT used on the claim path
-// (/api/agent/run, /api/evidence/submit) — those are idempotent, spend-capped,
-// and gated on the attester verdict rather than on the caller.
+// USED BY: lib/server/unlink-admin.ts (capability token issuance), the two
+// /api/junction/* routes, and /api/agent/run/[goalId] — where it decides who
+// may READ a claim's ledger, not who may run one. The run loop itself stays
+// unauthenticated on purpose: it is idempotent, spend-capped, and gated on the
+// attester verdict rather than on the caller, so a missing signature costs
+// visibility and never money. /api/evidence/submit is unauthenticated for the
+// same reason.
 
 import { getAddress, isAddress, verifyMessage, type Address } from "viem";
 

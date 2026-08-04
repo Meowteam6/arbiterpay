@@ -11,7 +11,10 @@
 //   1. Restore on mount - a returning user's ledger comes back from
 //      GET /api/agent/run/[goalId] and renders as the state it encodes. This
 //      is the DEFAULT tab for wearable pools, so without it a user with a
-//      claim in flight opened the page to an empty box.
+//      claim in flight opened the page to an empty box. The read is owner-only
+//      (goal ids are public; the ledger's prose is not), so every request
+//      carries one wallet signature reused across the session, and a claim
+//      that cannot be shown is reported as withheld rather than as absent.
 //   2. Say when the payout lands - the recorded state carries the settle
 //      moment and a countdown, and schedules the single automatic re-poll that
 //      makes the payout appear without anyone touching anything.
@@ -35,10 +38,21 @@ import {
 } from "@/lib/agent-receipt";
 import {
   fetchProviderState,
+  providerAuthReason,
   providerConnected,
   providerDownReason,
   providerQueryKey,
 } from "@/lib/wearable-provider";
+import { fetchWithWalletAuth } from "@/lib/client-auth";
+import { useWalletAuth } from "@/lib/useWalletAuth";
+import {
+  claimScreenOf,
+  claimVisibilityOf,
+  emptyClaimScreen,
+  nextClaimScreen,
+  receiptToKeep,
+  type ClaimScreen,
+} from "@/lib/claim-restore";
 import AgentReceipt from "@/components/AgentReceipt";
 import Countdown from "@/components/Countdown";
 import PayoutMoment from "@/components/PayoutMoment";
@@ -62,14 +76,25 @@ const TERMINAL: RunStatus[] = [
 
 interface RunResponse {
   status?: RunStatus;
+  /** Present only for a caller who proved control of this claim's wallet. */
   ledger?: LedgerEntry[];
+  /** Whether a claim exists at all, regardless of who is asking. */
+  hasLedger?: boolean;
   error?: string;
 }
 
 type CheckStatus =
   | { kind: "idle" }
   | { kind: "starting" }
-  | { kind: "agent"; runStatus: RunStatus; ledger: LedgerEntry[] }
+  | {
+      kind: "agent";
+      runStatus: RunStatus;
+      ledger: LedgerEntry[];
+      /** Set when the server withheld the receipt rows for this request. */
+      lockedReason: string | null;
+    }
+  /** A claim exists but cannot be shown without a signature from its wallet. */
+  | { kind: "locked"; reason: string }
   // ledger carries whatever SPOTTER recorded before the failure - money that
   // moved must stay on screen even when the run dies.
   | { kind: "error"; message: string; ledger?: LedgerEntry[] };
@@ -113,6 +138,7 @@ function WearableCheckInner({
   onSwitchToDocument?: () => void;
 }) {
   const { ready, authenticated, address, login } = useEmbeddedWallet();
+  const requestAuth = useWalletAuth();
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<CheckStatus>({ kind: "idle" });
   const [connectError, setConnectError] = useState<string | null>(null);
@@ -127,6 +153,11 @@ function WearableCheckInner({
   // background work and never drive a render by themselves.
   const goalIdRef = useRef<string | null>(null);
   const repollDoneRef = useRef(false);
+  // What the receipt currently shows. A poll loop starts from this rather than
+  // from nothing, so a failure on its FIRST request (a resumed claim, or the
+  // deferred-settle re-poll firing before the chain is ready) still renders
+  // the rows the user already has.
+  const screenRef = useRef<ClaimScreen>(emptyClaimScreen());
   // Poll-loop generation counter. Each new loop bumps it; a running loop stops
   // silently the moment it is superseded (fresh run, wallet switch, unmount)
   // so a stale loop can never overwrite a newer claim's screen. It also serves
@@ -141,7 +172,7 @@ function WearableCheckInner({
     queryKey: providerQueryKey(address),
     queryFn: () => {
       if (address === null) throw new Error("No wallet connected.");
-      return fetchProviderState(address);
+      return fetchProviderState(address, requestAuth);
     },
     enabled: address !== null,
     retry: false,
@@ -156,8 +187,10 @@ function WearableCheckInner({
   }, []);
 
   /**
-   * Drive SPOTTER's run loop. Every poll resumes it where it stopped and
-   * returns the full ledger; the receipt renders it verbatim. No attester id:
+   * Drive SPOTTER's run loop. Every poll resumes it where it stopped and, for
+   * the wallet that owns the claim, returns the full ledger (one cached
+   * signature covers the session, so this never prompts per tick); the receipt
+   * renders it verbatim. No attester id:
    * SPOTTER fetches the wearable summary itself, server-side, and derives the
    * claim's ref from the pool period on the chain.
    */
@@ -166,49 +199,64 @@ function WearableCheckInner({
       if (address === null) return;
       const seq = ++runSeqRef.current;
       let last: RunStatus = "verifying";
-      let lastLedger: LedgerEntry[] | undefined;
+      // Seeded from the screen, never from nothing: a failure on the first
+      // request of a resumed run (or of the deferred settle re-poll) must not
+      // blank a receipt that already lists money SPOTTER spent.
+      let screen = screenRef.current;
       for (let attempt = 0; attempt < MAX_POLLS; attempt++) {
         let body: RunResponse;
         try {
-          const res = await fetch(`/api/agent/run/${goalId}`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              poolId: poolId.toString(),
-              address,
-              goalSpec,
-              evidenceKind: "wearable",
-            }),
-          });
-          body = (await res.json().catch(() => ({}))) as RunResponse;
-          if (!res.ok) {
-            throw new Error(body.error ?? `SPOTTER responded ${res.status}.`);
+          const sent = await fetchWithWalletAuth(
+            `/api/agent/run/${goalId}`,
+            {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify({
+                poolId: poolId.toString(),
+                address,
+                goalSpec,
+                evidenceKind: "wearable",
+              }),
+            },
+            requestAuth,
+          );
+          body = (await sent.response.json().catch(() => ({}))) as RunResponse;
+          if (!sent.response.ok) {
+            throw new Error(
+              body.error ?? `SPOTTER responded ${sent.response.status}.`,
+            );
           }
+          screen = nextClaimScreen(screen, body, sent.auth);
+          screenRef.current = screen;
         } catch (err) {
           if (runSeqRef.current !== seq) return;
           setStatus({
             kind: "error",
             message:
               err instanceof Error ? err.message : "The agent run failed.",
-            ledger: lastLedger,
+            ledger: receiptToKeep(screen),
           });
           return;
         }
 
         if (runSeqRef.current !== seq) return;
 
-        if (body.status === undefined || body.ledger === undefined) {
+        if (body.status === undefined) {
           setStatus({
             kind: "error",
             message: "SPOTTER returned an unexpected response.",
-            ledger: lastLedger,
+            ledger: receiptToKeep(screen),
           });
           return;
         }
 
         last = body.status;
-        lastLedger = body.ledger;
-        setStatus({ kind: "agent", runStatus: last, ledger: body.ledger });
+        setStatus({
+          kind: "agent",
+          runStatus: last,
+          ledger: screen.ledger,
+          lockedReason: screen.lockedReason,
+        });
 
         if (TERMINAL.includes(last)) {
           if (last === "recorded") {
@@ -233,10 +281,10 @@ function WearableCheckInner({
         kind: "error",
         message:
           "Verification is taking longer than expected. Nothing is lost - your claim is saved, and this page picks it up where it left off.",
-        ledger: lastLedger,
+        ledger: receiptToKeep(screen),
       });
     },
-    [address, poolId, goalSpec, queryClient],
+    [address, poolId, goalSpec, queryClient, requestAuth],
   );
 
   // Restore on mount and on wallet change: once the wallet resolves, derive
@@ -253,20 +301,38 @@ function WearableCheckInner({
     void (async () => {
       try {
         const goalId = await fetchGoalId(poolId, address);
-        const res = await fetch(`/api/agent/run/${goalId}`);
-        if (!res.ok) throw new Error(`ledger read responded ${res.status}`);
-        const body = (await res.json().catch(() => ({}))) as RunResponse;
+        const sent = await fetchWithWalletAuth(
+          `/api/agent/run/${goalId}?poolId=${poolId.toString()}`,
+          undefined,
+          requestAuth,
+        );
+        if (!sent.response.ok) {
+          throw new Error(`ledger read responded ${sent.response.status}`);
+        }
+        const body = (await sent.response.json().catch(() => ({}))) as RunResponse;
         if (cancelled) return;
-        const ledger = Array.isArray(body.ledger) ? body.ledger : [];
+        const visibility = claimVisibilityOf(body, sent.auth);
         goalIdRef.current = goalId;
         repollDoneRef.current = false;
         setRestoredFor(address);
-        if (ledger.length === 0) {
+        if (visibility.kind === "locked") {
+          // A claim exists and is being withheld. The connect box here would
+          // read as "nothing has happened", which is the opposite of true.
+          screenRef.current = emptyClaimScreen();
+          setStatus({ kind: "locked", reason: visibility.reason });
+          return;
+        }
+        if (visibility.kind === "none") {
+          screenRef.current = emptyClaimScreen();
           setStatus({ kind: "idle" });
           return;
         }
+        const ledger = visibility.ledger;
+        // The poll loop and every error screen read from here, so the rows
+        // survive a failure on the resumed run's very first request.
+        screenRef.current = claimScreenOf(ledger);
         const runStatus = runStatusFromLedger(ledger) ?? "verifying";
-        setStatus({ kind: "agent", runStatus, ledger });
+        setStatus({ kind: "agent", runStatus, ledger, lockedReason: null });
         if (runStatus === "verifying") void pollRun(goalId);
       } catch (err) {
         // Restore is a read-only convenience; a failed read must not block a
@@ -281,7 +347,17 @@ function WearableCheckInner({
     return () => {
       cancelled = true;
     };
-  }, [ready, address, poolId, restoredFor, pollRun]);
+  }, [ready, address, poolId, restoredFor, pollRun, requestAuth]);
+
+  /** Sign again and re-run the restore. If the prompt is refused a second time
+   *  the restore lands back on the withheld state with the reason, so there is
+   *  one path and it always tells the truth. */
+  const unlockClaim = () => {
+    void (async () => {
+      await requestAuth({ refresh: true });
+      setRestoredFor(null);
+    })();
+  };
 
   // Deferred settlement: the settle entry may carry its own periodEndIso;
   // otherwise read periodEnd from the pool itself. The query key matches
@@ -369,6 +445,59 @@ function WearableCheckInner({
     );
   }
 
+  // A run that failed with rows already on screen. The receipt stays and the
+  // connect box does not appear above it: this claim already bought its
+  // verification, and inviting another run would spend the cap again. The
+  // retry re-reads the claim rather than starting a new one.
+  if (
+    status.kind === "error" &&
+    status.ledger !== undefined &&
+    status.ledger.length > 0
+  ) {
+    return (
+      <div className="space-y-4">
+        <AgentReceipt ledger={status.ledger} />
+        <ErrorNote
+          title="Lost contact with SPOTTER"
+          detail={`${status.message} The receipt above is what already happened and nothing in it is lost.`}
+          onRetry={() => setRestoredFor(null)}
+        />
+      </div>
+    );
+  }
+
+  // A claim exists for this wallet and the server would not hand it over. The
+  // connect box here would read as "nothing has happened" over a claim SPOTTER
+  // already spent money on.
+  if (status.kind === "locked") {
+    return (
+      <div className="space-y-3">
+        <h3 className="text-lg font-semibold">This claim is private</h3>
+        <div className="rounded-xl border border-accent/40 bg-accent-deep/20 p-4">
+          <p className="text-sm text-foreground/80">{status.reason}</p>
+        </div>
+        {!authenticated || address === null ? (
+          <button
+            type="button"
+            disabled={!ready}
+            onClick={login}
+            className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            Sign in to see this claim
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={unlockClaim}
+            className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent"
+          >
+            Sign and show my claim
+          </button>
+        )}
+      </div>
+    );
+  }
+
   if (status.kind === "agent") {
     const failureMode =
       status.runStatus === "no-pay" ? failureModeOf(status.ledger) : null;
@@ -389,6 +518,26 @@ function WearableCheckInner({
         ) : null}
 
         <AgentReceipt ledger={status.ledger} />
+
+        {/* The run keeps going without a signature; only the rows are held
+         *  back. Saying so beats a receipt that silently stops printing. */}
+        {status.lockedReason !== null ? (
+          <div className="rounded-xl border border-accent/40 bg-accent-deep/20 p-4">
+            <p className="text-base font-semibold">
+              The receipt is hidden, not stopped
+            </p>
+            <p className="mt-1 text-sm text-foreground/80">
+              {status.lockedReason} SPOTTER keeps working either way.
+            </p>
+            <button
+              type="button"
+              onClick={unlockClaim}
+              className="mt-3 w-full rounded-xl border border-accent/50 bg-surface-raised px-5 py-3 text-sm font-semibold text-accent hover:bg-accent-deep"
+            >
+              Sign and show the rows
+            </button>
+          </div>
+        ) : null}
 
         {status.runStatus === "verifying" ? (
           <p className="text-sm text-muted">
@@ -510,7 +659,17 @@ function WearableCheckInner({
 
   const providerState = providerQuery.data;
   const providerDown = providerDownReason(providerState);
+  const providerAuth = providerAuthReason(providerState);
   const connected = providerConnected(providerState);
+
+  /** Sign, then re-read the provider. Used when the wearable read came back
+   *  401: the device may well be connected, we just cannot look yet. */
+  const unlockProvider = () => {
+    void (async () => {
+      await requestAuth({ refresh: true });
+      await providerQuery.refetch();
+    })();
+  };
 
   return (
     <div className="space-y-3">
@@ -569,6 +728,23 @@ function WearableCheckInner({
             className="w-full rounded-xl border border-edge px-5 py-3 text-sm font-semibold text-foreground hover:border-accent/50"
           >
             Check the provider again
+          </button>
+        </div>
+      ) : providerAuth !== null ? (
+        // Not an outage and not a missing device: the read is this wallet's
+        // own health data and it has not been unlocked. Saying "no wearable
+        // connected" here would send someone to re-link a device that is
+        // already linked.
+        <div className="space-y-3">
+          <p className="rounded-xl border border-accent/40 bg-accent-deep/20 p-3 text-sm text-foreground/80">
+            {providerAuth}
+          </p>
+          <button
+            type="button"
+            onClick={unlockProvider}
+            className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent"
+          >
+            Sign and check my wearable
           </button>
         </div>
       ) : !connected ? (

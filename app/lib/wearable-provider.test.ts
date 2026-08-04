@@ -6,6 +6,7 @@
 import { describe, it, expect } from "vitest";
 import {
   parseProviderProgress,
+  providerAuthReason,
   providerConnected,
   providerDownReason,
   providerQueryKey,
@@ -81,6 +82,26 @@ describe("providerStateFrom", () => {
     });
     expect(state.kind).toBe("unavailable");
     expect(providerDownReason(state)).toContain("402");
+  });
+
+  it("keeps an unsigned read apart from an outage", () => {
+    // The route is signature-gated: a 401 means this wallet's own data is
+    // locked, not that Junction is down. Reporting it as an outage would take
+    // wearable goals off the board over a signature nobody asked for.
+    const state = providerStateFrom(401, { error: "Wallet signature required" });
+    expect(state.kind).toBe("auth-required");
+    expect(providerDownReason(state)).toBeNull();
+    expect(providerConnected(state)).toBe(false);
+    expect(providerAuthReason(state)).not.toBeNull();
+  });
+
+  it("explains the 401 in the terms of the auth attempt behind it", () => {
+    const state = providerStateFrom(401, null, { kind: "declined" });
+    expect(providerAuthReason(state)).toMatch(/sign/i);
+  });
+
+  it("still explains a 401 when no auth state is to hand", () => {
+    expect(providerAuthReason(providerStateFrom(401, null))).toMatch(/sign/i);
   });
 });
 

@@ -17,6 +17,8 @@ import {
   fetchAgentWallet,
 } from "@/lib/agent-budget";
 import type { LedgerEntry } from "@/lib/agent-receipt";
+import { fetchWithWalletAuth } from "@/lib/client-auth";
+import { useWalletAuth } from "@/lib/useWalletAuth";
 import { claimProofPathOf, type ProofPath } from "@/lib/claim-restore";
 import {
   fetchProviderState,
@@ -59,6 +61,7 @@ function BrowsePoolsLink({ label = "Browse live pools" }: { label?: string }) {
 
 export default function PoolDetail({ id }: { id: string }) {
   const { address } = useEmbeddedWallet();
+  const requestAuth = useWalletAuth();
   // Wearable pools offer two proof paths, but only one may be mounted at a
   // time: WearableCheck and EvidenceUpload both drive SPOTTER's run loop for
   // the same goal id, and two concurrent pollers with conflicting evidence
@@ -118,11 +121,19 @@ export default function PoolDetail({ id }: { id: string }) {
 
   // Wearable goals depend on an outside provider that can refuse us outright.
   // Shares one query key with the dashboard and the pool list.
+  //
+  // cachedOnly: this read decides whether to offer a join button, and nobody
+  // asked to unlock anything by opening a pool page. It uses a signature the
+  // session already has and otherwise comes back unsigned - which reports as
+  // "not known", never as an outage, so no goal is pulled off the page over a
+  // signature the visitor was never asked for.
   const providerQuery = useQuery({
     queryKey: providerQueryKey(address),
     queryFn: () => {
       if (address === null) throw new Error("No wallet connected.");
-      return fetchProviderState(address);
+      return fetchProviderState(address, (options) =>
+        requestAuth({ ...options, cachedOnly: true }),
+      );
     },
     enabled: address !== null,
     retry: false,
@@ -146,6 +157,14 @@ export default function PoolDetail({ id }: { id: string }) {
   // this is the only case where the answer can be wrong; the ledger is read
   // once and the claim section waits for it rather than mounting the wrong
   // path first and swapping it out from under a running restore.
+  //
+  // The read is owner-only, so it carries the wallet signature - but
+  // cachedOnly, exactly like providerQuery above. Opening a pool page is not a
+  // request to unlock anything, and this query gates the claim section behind
+  // a skeleton, so a prompting read here would be the first thing that happens
+  // on load for anyone who joined a wearable pool. Without a signature the
+  // server returns no entries, the path is unknown, and the default tab stands
+  // - the claim client itself then prompts and says why.
   const claimPathQuery = useQuery({
     queryKey: ["claim-proof-path", id, address],
     queryFn: async (): Promise<ProofPath | null> => {
@@ -153,9 +172,15 @@ export default function PoolDetail({ id }: { id: string }) {
         throw new Error("No claim identity yet.");
       }
       const goalId = await fetchGoalId(poolId, address);
-      const res = await fetch(`/api/agent/run/${goalId}`);
-      if (!res.ok) throw new Error(`ledger read responded ${res.status}`);
-      const body = (await res.json().catch(() => ({}))) as {
+      const sent = await fetchWithWalletAuth(
+        `/api/agent/run/${goalId}?poolId=${poolId.toString()}`,
+        undefined,
+        (options) => requestAuth({ ...options, cachedOnly: true }),
+      );
+      if (!sent.response.ok) {
+        throw new Error(`ledger read responded ${sent.response.status}`);
+      }
+      const body = (await sent.response.json().catch(() => ({}))) as {
         ledger?: LedgerEntry[];
       };
       return claimProofPathOf(Array.isArray(body.ledger) ? body.ledger : []);

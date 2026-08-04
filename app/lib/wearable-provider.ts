@@ -11,6 +11,21 @@
 // The split is a pure function of the response so it is testable under
 // vitest's node environment, and every caller shares one react-query key so
 // the endpoint is read once per address instead of once per component.
+//
+// A THIRD ANSWER: the route is signature-gated now, because a streak, a
+// metric label and a last-sync time are all derived from one person's sleep
+// data and a wallet address is public. An unsigned read comes back 401, and
+// that is neither "no device linked" nor "the provider is down" - it is "this
+// is yours and you have not proved it yet", which has its own copy and its own
+// one-tap fix. Reporting it as an outage would blame Junction for a signature
+// the user simply has not given.
+
+import {
+  authBlockReason,
+  fetchWithWalletAuth,
+  type ClientAuth,
+  type WalletAuthRequester,
+} from "@/lib/client-auth";
 
 /** The derived, privacy-safe progress the API returns. Raw health samples
  *  never cross this boundary; only counts and labels do. */
@@ -26,7 +41,9 @@ export type ProviderState =
   /** The provider answered. `connected` says whether a device is linked. */
   | { kind: "ok"; progress: ProviderProgress }
   /** The provider itself is the problem. Connecting a device cannot fix it. */
-  | { kind: "unavailable"; reason: string };
+  | { kind: "unavailable"; reason: string }
+  /** The data is this wallet's and the request was not signed for it. */
+  | { kind: "auth-required"; reason: string };
 
 /** The pool period a progress read can be scoped to. */
 export interface ProviderWindow {
@@ -104,13 +121,31 @@ export function providerUnavailableReason(
   );
 }
 
-/** Classify one /api/junction/progress response. */
+/** Fallback copy for a 401 when the auth state behind it is not to hand. */
+export const PROVIDER_SIGNATURE_REASON =
+  "Your wearable data is private to your wallet. Sign to unlock it - nothing " +
+  "is charged and no transaction is sent.";
+
+/**
+ * Classify one /api/junction/progress response. `auth` is the state the
+ * request was made under; when it is present it explains the 401 in the terms
+ * the person can act on (not connected, declined, never asked).
+ */
 export function providerStateFrom(
   status: number,
   payload: unknown,
+  auth?: ClientAuth,
 ): ProviderState {
   if (status >= 200 && status < 300) {
     return { kind: "ok", progress: parseProviderProgress(payload) };
+  }
+  if (status === 401) {
+    return {
+      kind: "auth-required",
+      reason:
+        (auth !== undefined ? authBlockReason(auth) : null) ??
+        PROVIDER_SIGNATURE_REASON,
+    };
   }
   return { kind: "unavailable", reason: providerUnavailableReason(status, payload) };
 }
@@ -123,12 +158,20 @@ export function providerConnected(state: ProviderState | undefined): boolean {
 /**
  * Why wearable verification is impossible, or null when it is possible or not
  * known yet. Deliberately null while loading: a page must not disable a pool
- * on a guess.
+ * on a guess. Also null for a missing signature - that is the reader's own
+ * unfinished step, not a reason to take a goal off the board for them.
  */
 export function providerDownReason(
   state: ProviderState | undefined,
 ): string | null {
   return state?.kind === "unavailable" ? state.reason : null;
+}
+
+/** Why this read needs a signature, or null when it does not need one. */
+export function providerAuthReason(
+  state: ProviderState | undefined,
+): string | null {
+  return state?.kind === "auth-required" ? state.reason : null;
 }
 
 /**
@@ -144,12 +187,18 @@ export function providerQueryKey(
 }
 
 /**
- * Read the provider through the app's own route. Never throws: a thrown query
- * would render as a generic error, and the whole point of this module is that
- * "the provider is down" is a specific, actionable state.
+ * Read the provider through the app's own route, signed. Never throws: a
+ * thrown query would render as a generic error, and the whole point of this
+ * module is that "the provider is down" and "prove this wallet is yours" are
+ * specific, actionable states.
+ *
+ * `requestAuth` decides whether a missing signature is worth a wallet prompt.
+ * Claim surfaces pass a prompting requester; browse surfaces pass
+ * `{ cachedOnly: true }` so a page nobody asked to unlock never opens a modal.
  */
 export async function fetchProviderState(
   address: `0x${string}`,
+  requestAuth: WalletAuthRequester,
   window?: ProviderWindow,
 ): Promise<ProviderState> {
   const scope =
@@ -157,9 +206,13 @@ export async function fetchProviderState(
       ? `&start=${Number(window.periodStart)}&end=${Number(window.periodEnd)}`
       : "";
   try {
-    const res = await fetch(`/api/junction/progress?address=${address}${scope}`);
-    const payload = (await res.json().catch(() => null)) as unknown;
-    return providerStateFrom(res.status, payload);
+    const sent = await fetchWithWalletAuth(
+      `/api/junction/progress?address=${address}${scope}`,
+      undefined,
+      requestAuth,
+    );
+    const payload = (await sent.response.json().catch(() => null)) as unknown;
+    return providerStateFrom(sent.response.status, payload, sent.auth);
   } catch {
     return PROVIDER_UNREACHABLE;
   }
