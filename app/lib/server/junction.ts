@@ -11,8 +11,31 @@
 // Privacy invariant (unchanged from WHOOP): raw samples never leave this
 // module — only derived per-day scores and a streak summary are surfaced, and
 // nothing here is written on-chain directly.
+//
+// Resilience: every request carries an AbortSignal timeout (a hung Junction
+// call used to burn the whole 60s function budget) and GET reads retry with
+// backoff. Writes never retry — creating a user or a link token twice is not a
+// no-op. The wallet -> Junction user_id mapping is memoized because it sat on
+// the hot path: getProgress/isConnected/getRecent each re-resolved it, so one
+// 800ms poll cost three HTTP round-trips instead of one.
 
 import { requireEnv, optionalEnv } from "@/lib/server/env";
+import { ttlCache } from "@/lib/server/arc-client";
+import { isRetryableExternalError, withRetry } from "@/lib/server/retry";
+
+/**
+ * A hung upstream must fail well inside the function's 60s budget.
+ * JUNCTION_TIMEOUT_MS overrides it (operator tuning, and tests that need to
+ * exercise the timeout without waiting 15 seconds).
+ */
+const DEFAULT_JUNCTION_TIMEOUT_MS = 15_000;
+const READ_ATTEMPTS = 2;
+const READ_BACKOFF_MS = [300];
+
+function junctionTimeoutMs(): number {
+  const raw = Number(optionalEnv("JUNCTION_TIMEOUT_MS", ""));
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_JUNCTION_TIMEOUT_MS;
+}
 
 function apiKey(): string {
   return requireEnv("JUNCTION_API_KEY");
@@ -26,7 +49,7 @@ function linkBase(): { env: string; region: string } {
   return { env, region };
 }
 
-async function jx<T>(path: string, init?: RequestInit): Promise<T> {
+async function jxOnce<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${baseUrl()}${path}`, {
     ...init,
     headers: {
@@ -34,12 +57,37 @@ async function jx<T>(path: string, init?: RequestInit): Promise<T> {
       "content-type": "application/json",
       ...(init?.headers ?? {}),
     },
+    signal: AbortSignal.timeout(junctionTimeoutMs()),
   });
   if (!res.ok) {
-    const text = await res.text();
-    throw new Error(`Junction ${path} returned ${res.status}: ${text}`);
+    const text = await res.text().catch(() => "");
+    // Truncated: this message can surface through a route's error handler, so
+    // it carries enough to debug without relaying an upstream response body.
+    throw new Error(
+      `Junction ${path} returned ${res.status}: ${text.slice(0, 200)}`,
+    );
   }
   return (await res.json()) as T;
+}
+
+/**
+ * Junction request. Retries only when the call is a read: a GET is idempotent,
+ * a POST here creates a user or issues a link token and must run exactly once.
+ */
+async function jx<T>(path: string, init?: RequestInit): Promise<T> {
+  const method = (init?.method ?? "GET").toUpperCase();
+  if (method !== "GET") return jxOnce<T>(path, init);
+  return withRetry(() => jxOnce<T>(path, init), {
+    attempts: READ_ATTEMPTS,
+    backoffMs: READ_BACKOFF_MS,
+    isRetryable: isRetryableExternalError,
+    onRetry: (err, attempt, attempts) =>
+      console.warn(
+        `[junction] GET ${path} attempt ${attempt}/${attempts} failed: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      ),
+  });
 }
 
 // --------------------------------------------------------------- user mapping
@@ -50,27 +98,64 @@ interface VitalUser {
 }
 
 /**
+ * A wallet's Junction user_id never changes once created, but every
+ * progress/status/data call re-resolved it, so a single 800ms dashboard poll
+ * cost three HTTP round-trips where one would do. The TTL is short so a user
+ * deleted upstream is not pinned forever, and failures are never cached.
+ */
+const USER_ID_TTL_MS = 10 * 60_000;
+const userIdCache = ttlCache<string>({
+  ttlMs: USER_ID_TTL_MS,
+  maxEntries: 512,
+});
+
+/**
  * Map a wallet address to a Junction user_id. Junction itself keys on
  * client_user_id, so we resolve-then-create and let it dedupe — no local store
  * needed. The address is lowercased to keep the client_user_id stable.
+ *
+ * Memoized per address; concurrent callers share one in-flight resolve, so a
+ * burst of polls cannot fan out into a burst of create attempts.
  */
 export async function getOrCreateUser(address: string): Promise<string> {
   const clientUserId = address.toLowerCase();
-  // 1) resolve existing
-  const resolved = await fetch(
-    `${baseUrl()}/v2/user/resolve/${encodeURIComponent(clientUserId)}`,
-    { headers: { "x-vital-api-key": apiKey() } },
-  );
-  if (resolved.ok) {
-    const u = (await resolved.json()) as VitalUser;
-    if (u.user_id) return u.user_id;
-  }
-  // 2) create
-  const created = await jx<VitalUser>("/v2/user", {
-    method: "POST",
-    body: JSON.stringify({ client_user_id: clientUserId }),
+  return userIdCache.get(clientUserId, async () => {
+    // 1) resolve existing (idempotent read, so retried)
+    try {
+      const resolved = await withRetry(
+        () =>
+          jxOnce<VitalUser>(
+            `/v2/user/resolve/${encodeURIComponent(clientUserId)}`,
+          ),
+        {
+          attempts: READ_ATTEMPTS,
+          backoffMs: READ_BACKOFF_MS,
+          isRetryable: isRetryableExternalError,
+        },
+      );
+      if (resolved.user_id) return resolved.user_id;
+    } catch (err) {
+      // A 404 here is the normal "not created yet" path, so this is expected
+      // noise; anything else still falls through to the create below, which
+      // Junction dedupes on client_user_id.
+      console.warn(
+        `[junction] user resolve fell through to create: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
+    // 2) create — a write, so never retried.
+    const created = await jx<VitalUser>("/v2/user", {
+      method: "POST",
+      body: JSON.stringify({ client_user_id: clientUserId }),
+    });
+    if (!created.user_id) {
+      // Throw rather than return an empty id: the cache never stores a
+      // rejected load, so a bad response cannot be pinned for the whole TTL.
+      throw new Error("Junction created a user but returned no user_id");
+    }
+    return created.user_id;
   });
-  return created.user_id;
 }
 
 // ------------------------------------------------------------------ link flow
