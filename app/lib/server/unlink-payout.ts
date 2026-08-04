@@ -1,4 +1,4 @@
-import { isClaimed, markClaimed, unmarkClaimed } from "@/lib/server/claims";
+import { tryMarkClaimed, unmarkClaimed } from "@/lib/server/claims";
 
 export interface PayoutTreasury {
   deposit(args: { token: string; amount: string }): Promise<unknown>;
@@ -38,8 +38,12 @@ export async function runPrivatePayout(args: {
   token: string;
   treasury: PayoutTreasury;
 }): Promise<PayoutResult> {
-  if (await isClaimed(args.goalId)) return { status: "already-claimed" };
-  await markClaimed(args.goalId);
+  // Claim-or-lose in one atomic step. The old shape read then wrote, so two
+  // concurrent payouts for the same goal could both see "unclaimed" and both
+  // pay. Losing the race is an expected outcome, not an error: the winner is
+  // paying, so this caller reports already-claimed rather than throwing a 500
+  // at a user whose money is on its way.
+  if (!(await tryMarkClaimed(args.goalId))) return { status: "already-claimed" };
   try {
     await settle(args.treasury.deposit({ token: args.token, amount: args.amountBaseUnits }));
     await settle(
