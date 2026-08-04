@@ -28,6 +28,26 @@ export interface RetryOptions {
   isRetryable?: (err: unknown) => boolean;
   /** Called before each retry, for logging. Never throws into the caller. */
   onRetry?: (err: unknown, attempt: number, attempts: number) => void;
+  /**
+   * Wall-clock budget for the whole retry sequence. Once it is spent, the last
+   * error is rethrown instead of attempting again.
+   *
+   * An attempt COUNT cannot bound total time when the wrapped call is itself
+   * slow, and stacking a retry on a call that already retries internally
+   * multiplies the two. The Arc transport falls back across three endpoints
+   * with its own timeout, so a single read can legitimately take tens of
+   * seconds during an outage; three attempts of that overruns the serverless
+   * function budget and the platform kills the request with no error response
+   * at all, which is strictly worse than failing fast.
+   *
+   * The deadline is checked BETWEEN attempts, so it cannot interrupt a call
+   * already in flight: the real bound is `deadlineMs + one attempt`. That is
+   * the intended behaviour — it collapses to a single attempt when the wrapped
+   * call is slow, while still allowing several retries when failures are fast
+   * (a rate-limited endpoint answering 429 immediately, the case this retry
+   * actually exists for).
+   */
+  deadlineMs?: number;
 }
 
 const sleep = (ms: number) =>
@@ -50,6 +70,8 @@ export async function withRetry<T>(
       ? options.backoffMs
       : DEFAULT_BACKOFF_MS;
   const isRetryable = options.isRetryable ?? (() => true);
+  const deadlineMs = options.deadlineMs;
+  const startedAt = Date.now();
 
   let lastError: unknown;
   for (let attempt = 1; attempt <= attempts; attempt += 1) {
@@ -59,8 +81,18 @@ export async function withRetry<T>(
       lastError = err;
       const isLast = attempt === attempts;
       if (isLast || !isRetryable(err)) throw err;
+      const backoff = backoffMs[attempt - 1] ?? backoffMs[backoffMs.length - 1];
+      // Budget spent, or the next attempt plus its backoff would overrun it.
+      // Failing now with the real error beats being killed mid-attempt by the
+      // platform, which surfaces nothing to the caller at all.
+      if (
+        deadlineMs !== undefined &&
+        Date.now() - startedAt + backoff >= deadlineMs
+      ) {
+        throw err;
+      }
       options.onRetry?.(err, attempt, attempts);
-      await sleep(backoffMs[attempt - 1] ?? backoffMs[backoffMs.length - 1]);
+      await sleep(backoff);
     }
   }
   // Unreachable: the loop either returns or throws.

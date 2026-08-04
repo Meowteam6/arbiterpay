@@ -80,6 +80,54 @@ describe("withRetry", () => {
     expect(Date.now() - started).toBeGreaterThanOrEqual(55);
   });
 
+  it("stops retrying once the wall-clock deadline is spent", async () => {
+    // The bug this guards: the Arc transport falls back across three endpoints
+    // with its own timeout, so a slow call plus an attempt count multiplies
+    // past the 60s function budget and the platform kills the request with no
+    // error surfaced. A slow call must collapse to ONE attempt.
+    const fn = vi.fn(
+      () =>
+        new Promise<string>((_resolve, reject) =>
+          setTimeout(() => reject(new Error("slow upstream")), 60),
+        ),
+    );
+    await expect(
+      withRetry(fn, { attempts: 5, backoffMs: [10], deadlineMs: 40 }),
+    ).rejects.toThrow("slow upstream");
+    expect(fn).toHaveBeenCalledTimes(1);
+  });
+
+  it("still allows the full attempt count when failures are fast", async () => {
+    // The case the retry actually exists for: a rate-limited endpoint answering
+    // 429 immediately. The deadline must not rob it of its retries.
+    const fn = vi.fn(() => Promise.reject(new Error("429 rate limited")));
+    await expect(
+      withRetry(fn, { attempts: 3, backoffMs: [1], deadlineMs: 5_000 }),
+    ).rejects.toThrow("429 rate limited");
+    expect(fn).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not report a retry it then refuses to make", async () => {
+    // onRetry drives the logs; announcing a retry that the deadline cancels
+    // would make the logs disagree with what actually happened.
+    const seen: number[] = [];
+    const fn = vi.fn(
+      () =>
+        new Promise<string>((_resolve, reject) =>
+          setTimeout(() => reject(new Error("slow")), 60),
+        ),
+    );
+    await expect(
+      withRetry(fn, {
+        attempts: 5,
+        backoffMs: [10],
+        deadlineMs: 40,
+        onRetry: (_err, attempt) => seen.push(attempt),
+      }),
+    ).rejects.toThrow("slow");
+    expect(seen).toEqual([]);
+  });
+
   it("reuses the last backoff value when attempts outrun the schedule", async () => {
     const fn = vi.fn(() => Promise.reject(new Error("down")));
     await expect(

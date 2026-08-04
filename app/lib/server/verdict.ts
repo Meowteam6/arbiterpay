@@ -68,6 +68,21 @@ const RECORD_ATTEMPTS = 3;
 /** Backoff before attempts 2 and 3. Keeps the polling endpoint responsive. */
 const RETRY_BACKOFF_MS = DEFAULT_BACKOFF_MS;
 
+/**
+ * Wall-clock ceilings for the retry sequences below.
+ *
+ * The Arc transport already falls back across three endpoints with its own
+ * timeout, so a single read can take tens of seconds during a full outage.
+ * Multiplying that by an attempt count overruns the 60s maxDuration on the
+ * routes that call this (app/api/agent/run/[goalId], app/api/agent/sweep) and
+ * the platform kills the request without surfacing any error. These budgets
+ * collapse the retry to a single attempt when the chain is slow, while still
+ * allowing the full three attempts when failures are fast — a rate-limited
+ * endpoint answering 429 immediately, which is what the retry is really for.
+ */
+const READ_DEADLINE_MS = 15_000;
+const WRITE_DEADLINE_MS = 35_000;
+
 function oracleAccount() {
   const pk = requireEnv("ORACLE_SIGNER_PRIVATE_KEY");
   return privateKeyToAccount((pk.startsWith("0x") ? pk : `0x${pk}`) as Hex);
@@ -129,6 +144,7 @@ export async function computeGoalId(
       {
         attempts: RECORD_ATTEMPTS,
         backoffMs: RETRY_BACKOFF_MS,
+        deadlineMs: READ_DEADLINE_MS,
         isRetryable: isRetryableExternalError,
         onRetry: (err, attempt, attempts) =>
           console.warn(
@@ -217,6 +233,7 @@ export async function recordVerdict(
       {
         attempts: RECORD_ATTEMPTS,
         backoffMs: RETRY_BACKOFF_MS,
+        deadlineMs: WRITE_DEADLINE_MS,
         isRetryable: (err) =>
           !ALREADY_RECORDED_RE.test(
             err instanceof Error ? err.message : String(err),
