@@ -1,7 +1,38 @@
 // Shared helpers for API route handlers.
+//
+// The two failure helpers exist for opposite audiences. errorMessage is for
+// the SERVER log: it walks the cause chain so a wrapped SDK failure never
+// hides the real one. safeError is for the CLIENT: those same chained
+// messages carry RPC URLs, store paths, ledger file names, wallet ids and
+// contract internals, and every route in this app is reachable by anyone with
+// the URL. A correlation id is the only thing both sides share, so a user can
+// quote it and an operator can grep for it.
 
 export function jsonError(status: number, message: string): Response {
   return Response.json({ error: message }, { status });
+}
+
+/**
+ * A short id for one request, prefixed with the route that minted it — e.g.
+ * "evidence-submit-3f9a2c11". Short enough for a human to read back over
+ * support, unique enough to find one line in a log.
+ */
+export function newCorrelationId(prefix: string): string {
+  return `${prefix}-${globalThis.crypto.randomUUID().slice(0, 8)}`;
+}
+
+/**
+ * Log the real failure server-side, in full, and return a generic line that
+ * is safe to hand an unauthenticated caller.
+ *
+ * Never return errorMessage(err) or err.message to a client: the money paths
+ * wrap viem, Circle and store errors whose text leaks infrastructure detail.
+ * The failure stays LOUD where it matters (the server log) and opaque where
+ * it would help an attacker.
+ */
+export function safeError(err: unknown, correlationId: string): string {
+  console.error(`[${correlationId}] ${errorMessage(err)}`, err);
+  return `Something went wrong on our side. Reference ${correlationId}.`;
 }
 
 /**
