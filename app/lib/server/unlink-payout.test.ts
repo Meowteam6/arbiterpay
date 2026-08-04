@@ -76,4 +76,33 @@ describe("runPrivatePayout", () => {
     const second = await runPrivatePayout({ ...args, treasury: fakeTreasury() });
     expect(second.status).toBe("already-claimed");
   });
+
+  // The sequential test above passes even against a read-then-write claim
+  // check. This one does not: with `if (isClaimed) return; markClaimed()` both
+  // callers read "unclaimed" before either writes, so both pay. It is the test
+  // that pins the atomic claim-or-lose primitive, and the reason a user cannot
+  // be paid twice from the treasury by two simultaneous requests.
+  it("pays exactly once when two payouts race the same goalId", async () => {
+    const args = {
+      goalId: "goal-race",
+      recipientUnlinkAddress: "unlink1recipient",
+      amountBaseUnits: "250000",
+      token: "0xUSDC",
+    };
+    await unmarkClaimed(args.goalId);
+    const a = fakeTreasury();
+    const b = fakeTreasury();
+
+    const results = await Promise.all([
+      runPrivatePayout({ ...args, treasury: a }),
+      runPrivatePayout({ ...args, treasury: b }),
+    ]);
+
+    const statuses = results.map((r) => r.status).sort();
+    expect(statuses).toEqual(["already-claimed", "paid"]);
+    // Exactly one treasury moved money; losing the race must not transfer.
+    const transfers =
+      a.transfer.mock.calls.length + b.transfer.mock.calls.length;
+    expect(transfers).toBe(1);
+  });
 });

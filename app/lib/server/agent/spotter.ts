@@ -24,10 +24,7 @@
 // same request instead of writing a red row the next cron tick has to undo.
 
 import {
-  createPublicClient,
-  defineChain,
   formatUnits,
-  http,
   keccak256,
   parseEventLogs,
   stringToBytes,
@@ -36,7 +33,8 @@ import {
   type Log,
 } from "viem";
 import type { CircleDeveloperControlledWalletsClient } from "@circle-fin/developer-controlled-wallets";
-import { optionalEnv, requireEnv } from "@/lib/server/env";
+import { arcPublicClient, ttlCache } from "@/lib/server/arc-client";
+import { requireEnv } from "@/lib/server/env";
 import { errorMessage } from "@/lib/server/http";
 import { readJson, writeJson } from "@/lib/server/store";
 import type { Confidence } from "@/lib/server/judge";
@@ -503,15 +501,13 @@ const VERDICT_READ_ABI = [
   },
 ] as const;
 
-function arcTestnet() {
-  const rpcUrl = optionalEnv("ARC_RPC_URL", "https://rpc.testnet.arc.network");
-  return defineChain({
-    id: 5042002,
-    name: "Arc Testnet",
-    nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
-    rpcUrls: { default: { http: [rpcUrl] } },
-  });
-}
+/**
+ * The agent's on-chain roles change roughly never, but they are read on every
+ * poll of every claim - two RPC calls per poll at an 800ms interval, per user.
+ * A short TTL collapses that to one read per instance per minute while still
+ * picking up a role cutover (scripts/set-agent-oracle.sh) within the window.
+ */
+const roleCache = ttlCache<Address>({ ttlMs: 60_000, maxEntries: 8 });
 
 /**
  * Remembers which transaction settled a pool.
@@ -583,7 +579,10 @@ export function payoutFromLogs(
 export function arcReader(
   settleTxCache: SettleTxCache = storeSettleTxCache(),
 ): ArcReader {
-  const client = createPublicClient({ chain: arcTestnet(), transport: http() });
+  // The shared fallback client: batches the 6-9 reads a single claim poll
+  // makes into one JSON-RPC request, and survives one endpoint rate-limiting
+  // us. A per-call client could do neither.
+  const client = arcPublicClient();
   const pools = () => requireEnv("HEALTH_POOLS_ADDRESS") as Address;
   const registry = () => requireEnv("HEALTH_VERDICT_ADDRESS") as Address;
 
@@ -622,18 +621,22 @@ export function arcReader(
       });
     },
     async oracleAddress() {
-      return client.readContract({
-        address: pools(),
-        abi: POOLS_READ_ABI,
-        functionName: "oracle",
-      });
+      return roleCache.get(`oracle:${pools()}`, () =>
+        client.readContract({
+          address: pools(),
+          abi: POOLS_READ_ABI,
+          functionName: "oracle",
+        }),
+      );
     },
     async attesterAddress() {
-      return client.readContract({
-        address: registry(),
-        abi: VERDICT_READ_ABI,
-        functionName: "attester",
-      });
+      return roleCache.get(`attester:${registry()}`, () =>
+        client.readContract({
+          address: registry(),
+          abi: VERDICT_READ_ABI,
+          functionName: "attester",
+        }),
+      );
     },
     async participantRecorded(poolId, user) {
       const participant = await client.readContract({
