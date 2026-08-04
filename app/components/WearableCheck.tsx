@@ -6,21 +6,43 @@
 // SPOTTER pulls the health summary server-side, so nothing raw ever passes
 // through the browser or the chain. Mirrors the document flow's polling and
 // receipt so both evidence paths end in the same terminal states.
+//
+// Three things it now does that the document flow always did:
+//   1. Restore on mount - a returning user's ledger comes back from
+//      GET /api/agent/run/[goalId] and renders as the state it encodes. This
+//      is the DEFAULT tab for wearable pools, so without it a user with a
+//      claim in flight opened the page to an empty box.
+//   2. Say when the payout lands - the recorded state carries the settle
+//      moment and a countdown, and schedules the single automatic re-poll that
+//      makes the payout appear without anyone touching anything.
+//   3. Refuse to loop on a dead provider - when Junction is refusing us, the
+//      connect flow can only ever 502, so the CTA is replaced by the reason
+//      and a one-tap move to the document proof path.
 
-import { useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { DYNAMIC_CONFIGURED } from "@/lib/config";
-import { displayGoalSpec, fetchGoalId } from "@/lib/contract";
+import { displayGoalSpec, fetchGoalId, fetchPool } from "@/lib/contract";
 import { useEmbeddedWallet } from "@/lib/wallet";
 import {
+  deferredPeriodEndMs,
   failureModeOf,
+  runStatusFromLedger,
+  settleRepollDelayMs,
   toUsd2,
   type LedgerEntry,
   type RunStatus,
 } from "@/lib/agent-receipt";
+import {
+  fetchProviderState,
+  providerConnected,
+  providerDownReason,
+  providerQueryKey,
+} from "@/lib/wearable-provider";
 import AgentReceipt from "@/components/AgentReceipt";
+import Countdown from "@/components/Countdown";
 import PayoutMoment from "@/components/PayoutMoment";
-import { ErrorNote, Skeleton } from "@/components/ui";
+import { ErrorNote, Skeleton, TAP_TARGET } from "@/components/ui";
 
 // Same cadence as the document flow, but wearable runs wait on provider data
 // pulls, so the cap allows five minutes before a stuck run surfaces.
@@ -52,34 +74,6 @@ type CheckStatus =
   // moved must stay on screen even when the run dies.
   | { kind: "error"; message: string; ledger?: LedgerEntry[] };
 
-type ConnectionState =
-  | { kind: "connected" }
-  | { kind: "not-connected" }
-  | { kind: "unavailable"; reason: string };
-
-async function fetchConnectionState(
-  address: `0x${string}`,
-): Promise<ConnectionState> {
-  try {
-    const res = await fetch(`/api/junction/progress?address=${address}`);
-    if (!res.ok) {
-      return {
-        kind: "unavailable",
-        reason: `Wearable connection check responded ${res.status}.`,
-      };
-    }
-    const body = (await res.json()) as { connected?: boolean };
-    return body.connected === true
-      ? { kind: "connected" }
-      : { kind: "not-connected" };
-  } catch {
-    return {
-      kind: "unavailable",
-      reason: "Could not reach the wearable connection check.",
-    };
-  }
-}
-
 /** Open Junction Link in a new tab to connect WHOOP, Oura, Fitbit, Garmin. */
 async function openConnectFlow(address: `0x${string}`): Promise<void> {
   const res = await fetch("/api/junction/link", {
@@ -99,133 +93,269 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
+/** Human-readable local time for the settlement moment. */
+function formatLocalTime(ms: number): string {
+  return new Date(ms).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function WearableCheckInner({
   poolId,
   goalSpec,
+  onSwitchToDocument,
 }: {
   poolId: bigint;
   goalSpec: string;
+  onSwitchToDocument?: () => void;
 }) {
   const { ready, authenticated, address, login } = useEmbeddedWallet();
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<CheckStatus>({ kind: "idle" });
   const [connectError, setConnectError] = useState<string | null>(null);
-  // A queued second click must not start a second poll loop against the same
-  // goal; state updates flush too late to be the guard.
-  const runningRef = useRef(false);
+  // Which wallet address the ledger restore last completed for. Until it
+  // matches the connected address the UI shows a loading state rather than an
+  // idle box (a lie for anyone whose claim already ran) or the previous
+  // wallet's claim state (worse: a wrong money screen).
+  const [restoredFor, setRestoredFor] = useState<string | null>(null);
+
+  // Claim identity shared across the run, the mount restore, and the deferred
+  // settle re-poll. Refs, not state: they identify the in-flight attempt for
+  // background work and never drive a render by themselves.
+  const goalIdRef = useRef<string | null>(null);
+  const repollDoneRef = useRef(false);
+  // Poll-loop generation counter. Each new loop bumps it; a running loop stops
+  // silently the moment it is superseded (fresh run, wallet switch, unmount)
+  // so a stale loop can never overwrite a newer claim's screen. It also serves
+  // as the re-entry guard a queued second tap would otherwise defeat.
+  const runSeqRef = useRef(0);
 
   const readableGoal = displayGoalSpec(goalSpec);
 
-  const connectionQuery = useQuery({
-    // Key is distinct from the dashboard's junction queries: this one caches
-    // a ConnectionState, and sharing a key would serve the wrong shape.
-    queryKey: ["junction-connection-state", address],
+  // The provider read is shared with the dashboard and the pool list through
+  // one query key: same endpoint, same parsed shape, one request per address.
+  const providerQuery = useQuery({
+    queryKey: providerQueryKey(address),
     queryFn: () => {
       if (address === null) throw new Error("No wallet connected.");
-      return fetchConnectionState(address);
+      return fetchProviderState(address);
     },
     enabled: address !== null,
     retry: false,
   });
 
-  const run = async () => {
-    if (address === null) return;
-    if (runningRef.current) return;
-    runningRef.current = true;
-    try {
-      await runInner(address);
-    } finally {
-      runningRef.current = false;
-    }
-  };
+  // Stop any in-flight poll loop on unmount.
+  useEffect(() => {
+    const seqRef = runSeqRef;
+    return () => {
+      seqRef.current++;
+    };
+  }, []);
 
-  const runInner = async (address: `0x${string}`) => {
-    // The claim's ledger is keyed by the on-chain goal id, so read it from
-    // the contract; the run route re-derives and enforces the match.
-    setStatus({ kind: "starting" });
-    let goalId: string;
-    try {
-      goalId = await fetchGoalId(poolId, address);
-    } catch (err) {
+  /**
+   * Drive SPOTTER's run loop. Every poll resumes it where it stopped and
+   * returns the full ledger; the receipt renders it verbatim. No attester id:
+   * SPOTTER fetches the wearable summary itself, server-side, and derives the
+   * claim's ref from the pool period on the chain.
+   */
+  const pollRun = useCallback(
+    async (goalId: string) => {
+      if (address === null) return;
+      const seq = ++runSeqRef.current;
+      let last: RunStatus = "verifying";
+      let lastLedger: LedgerEntry[] | undefined;
+      for (let attempt = 0; attempt < MAX_POLLS; attempt++) {
+        let body: RunResponse;
+        try {
+          const res = await fetch(`/api/agent/run/${goalId}`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              poolId: poolId.toString(),
+              address,
+              goalSpec,
+              evidenceKind: "wearable",
+            }),
+          });
+          body = (await res.json().catch(() => ({}))) as RunResponse;
+          if (!res.ok) {
+            throw new Error(body.error ?? `SPOTTER responded ${res.status}.`);
+          }
+        } catch (err) {
+          if (runSeqRef.current !== seq) return;
+          setStatus({
+            kind: "error",
+            message:
+              err instanceof Error ? err.message : "The agent run failed.",
+            ledger: lastLedger,
+          });
+          return;
+        }
+
+        if (runSeqRef.current !== seq) return;
+
+        if (body.status === undefined || body.ledger === undefined) {
+          setStatus({
+            kind: "error",
+            message: "SPOTTER returned an unexpected response.",
+            ledger: lastLedger,
+          });
+          return;
+        }
+
+        last = body.status;
+        lastLedger = body.ledger;
+        setStatus({ kind: "agent", runStatus: last, ledger: body.ledger });
+
+        if (TERMINAL.includes(last)) {
+          if (last === "recorded") {
+            await queryClient.invalidateQueries({ queryKey: ["pool"] });
+            await queryClient.invalidateQueries({ queryKey: ["participant"] });
+          }
+          if (last === "paid") {
+            // Refresh the participant only. Refetching the pool here flips it
+            // to settled and unmounts this component mid-payout-moment; the
+            // pool page's polling interval reconciles the phase shortly after.
+            await queryClient.invalidateQueries({ queryKey: ["participant"] });
+          }
+          return;
+        }
+        await sleep(POLL_INTERVAL_MS);
+      }
+
+      if (runSeqRef.current !== seq) return;
+      // Exhausted polls without a terminal status. Keep whatever the ledger
+      // already shows - spends that happened must not vanish from the screen.
       setStatus({
         kind: "error",
         message:
-          err instanceof Error
-            ? err.message
-            : "Could not derive the goal id from the contract.",
+          "Verification is taking longer than expected. Nothing is lost - your claim is saved, and this page picks it up where it left off.",
+        ledger: lastLedger,
       });
-      return;
-    }
+    },
+    [address, poolId, goalSpec, queryClient],
+  );
 
-    // Drive SPOTTER's run loop. Every poll resumes it where it stopped and
-    // returns the full ledger; the receipt renders it verbatim. No attester
-    // id: SPOTTER fetches the wearable summary itself, server-side.
-    let last: RunStatus = "verifying";
-    let lastLedger: LedgerEntry[] | undefined;
-    for (let attempt = 0; attempt < MAX_POLLS; attempt++) {
-      let body: RunResponse;
+  // Restore on mount and on wallet change: once the wallet resolves, derive
+  // the goal id the same way a run does and fetch any existing ledger, so a
+  // returning user sees their receipt and its terminal state instead of the
+  // connect box. Keyed to the address so switching wallets restores the new
+  // wallet's claim rather than keeping the previous one on screen.
+  useEffect(() => {
+    if (!ready || address === null || restoredFor === address) return;
+    // Supersede any poll loop still running for a previous wallet before this
+    // wallet's state loads; pollRun below starts a fresh generation.
+    runSeqRef.current++;
+    let cancelled = false;
+    void (async () => {
       try {
-        const res = await fetch(`/api/agent/run/${goalId}`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            poolId: poolId.toString(),
-            address,
-            goalSpec,
-            evidenceKind: "wearable",
-          }),
-        });
-        body = (await res.json().catch(() => ({}))) as RunResponse;
-        if (!res.ok) {
-          throw new Error(body.error ?? `SPOTTER responded ${res.status}.`);
+        const goalId = await fetchGoalId(poolId, address);
+        const res = await fetch(`/api/agent/run/${goalId}`);
+        if (!res.ok) throw new Error(`ledger read responded ${res.status}`);
+        const body = (await res.json().catch(() => ({}))) as RunResponse;
+        if (cancelled) return;
+        const ledger = Array.isArray(body.ledger) ? body.ledger : [];
+        goalIdRef.current = goalId;
+        repollDoneRef.current = false;
+        setRestoredFor(address);
+        if (ledger.length === 0) {
+          setStatus({ kind: "idle" });
+          return;
         }
+        const runStatus = runStatusFromLedger(ledger) ?? "verifying";
+        setStatus({ kind: "agent", runStatus, ledger });
+        if (runStatus === "verifying") void pollRun(goalId);
+      } catch (err) {
+        // Restore is a read-only convenience; a failed read must not block a
+        // fresh run. Logged so it is never silent.
+        console.error("[claim] could not restore the existing ledger:", err);
+        if (!cancelled) {
+          setRestoredFor(address);
+          setStatus({ kind: "idle" });
+        }
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [ready, address, poolId, restoredFor, pollRun]);
+
+  // Deferred settlement: the settle entry may carry its own periodEndIso;
+  // otherwise read periodEnd from the pool itself. The query key matches
+  // PoolDetail's, so this is usually served from cache.
+  const poolQuery = useQuery({
+    queryKey: ["pool", poolId.toString()],
+    queryFn: () => fetchPool(poolId),
+    enabled: status.kind === "agent" && status.runStatus === "recorded",
+  });
+  const periodEndMs =
+    status.kind === "agent" && status.runStatus === "recorded"
+      ? deferredPeriodEndMs(
+          status.ledger,
+          poolQuery.data !== undefined ? Number(poolQuery.data.periodEnd) : null,
+        )
+      : null;
+
+  // Schedule exactly one automatic re-poll shortly after the period ends, so
+  // the payout appears without any human action. The run route settles in-line
+  // on that poll; repollDoneRef keeps this to a single shot even if the chain
+  // is not quite ready when it fires. Gated on the restore being current for
+  // the connected address: during a wallet switch the cleanup disarms the
+  // previous wallet's timer and nothing re-arms until the new wallet loads.
+  useEffect(() => {
+    if (!ready || address === null || restoredFor !== address) return;
+    if (status.kind !== "agent" || status.runStatus !== "recorded") return;
+    if (repollDoneRef.current || periodEndMs === null) return;
+    const goalId = goalIdRef.current;
+    if (goalId === null) return;
+    const timer = setTimeout(() => {
+      repollDoneRef.current = true;
+      void pollRun(goalId);
+    }, settleRepollDelayMs(periodEndMs, Date.now()));
+    return () => clearTimeout(timer);
+  }, [ready, address, restoredFor, status, periodEndMs, pollRun]);
+
+  const run = async () => {
+    if (address === null) return;
+    // The claim's ledger is keyed by the on-chain goal id. The restore already
+    // read it from the contract; only fall back to a fresh read if it did not.
+    setStatus({ kind: "starting" });
+    let goalId = goalIdRef.current;
+    if (goalId === null) {
+      try {
+        goalId = await fetchGoalId(poolId, address);
+        goalIdRef.current = goalId;
       } catch (err) {
         setStatus({
           kind: "error",
-          message: err instanceof Error ? err.message : "The agent run failed.",
-          ledger: lastLedger,
+          message:
+            err instanceof Error
+              ? err.message
+              : "Could not derive the goal id from the contract.",
         });
         return;
       }
-
-      if (body.status === undefined || body.ledger === undefined) {
-        setStatus({
-          kind: "error",
-          message: "SPOTTER returned an unexpected response.",
-          ledger: lastLedger,
-        });
-        return;
-      }
-
-      last = body.status;
-      lastLedger = body.ledger;
-      setStatus({ kind: "agent", runStatus: last, ledger: body.ledger });
-
-      if (TERMINAL.includes(last)) {
-        if (last === "recorded") {
-          await queryClient.invalidateQueries({ queryKey: ["pool"] });
-          await queryClient.invalidateQueries({ queryKey: ["participant"] });
-        }
-        if (last === "paid") {
-          // Refresh the participant only. Refetching the pool here flips it
-          // to settled and unmounts this component mid-payout-moment; the
-          // pool page's polling interval reconciles the phase shortly after.
-          await queryClient.invalidateQueries({ queryKey: ["participant"] });
-        }
-        return;
-      }
-      await sleep(POLL_INTERVAL_MS);
     }
-
-    // Exhausted polls without a terminal status. Keep whatever the ledger
-    // already shows - spends that happened must not vanish from the screen.
-    setStatus({
-      kind: "error",
-      message:
-        "Verification is taking longer than expected. SPOTTER did not reach a verdict in time - run the check again.",
-      ledger: lastLedger,
-    });
+    repollDoneRef.current = false;
+    await pollRun(goalId);
   };
+
+  // Loading gate, derived rather than stored: while the wallet SDK is still
+  // booting, or a connected wallet's ledger has not been restored yet, any
+  // other render would either flash the connect box over an existing claim or
+  // show a previous wallet's money screen. Signed-out visitors have no ledger
+  // to restore and fall through to the sign-in prompt.
+  if (!ready || (address !== null && restoredFor !== address)) {
+    return (
+      <div className="space-y-3">
+        <Skeleton className="h-6 w-40" />
+        <Skeleton className="h-16" />
+      </div>
+    );
+  }
 
   if (status.kind === "starting") {
     return (
@@ -267,10 +397,29 @@ function WearableCheckInner({
         ) : null}
 
         {status.runStatus === "recorded" ? (
-          <p className="text-sm text-muted">
-            Verified and recorded on-chain. SPOTTER settles the payout the
-            moment the pool period ends - no human involved.
-          </p>
+          <div className="rounded-xl border border-edge bg-surface-raised p-4">
+            <p className="text-base font-semibold">
+              Verified and recorded on-chain.
+            </p>
+            {periodEndMs !== null ? (
+              <p className="mt-1 text-sm text-foreground/80">
+                SPOTTER settles the payout when the pool period ends at{" "}
+                {formatLocalTime(periodEndMs)} (
+                <Countdown
+                  periodStart={0n}
+                  periodEnd={BigInt(Math.floor(periodEndMs / 1000))}
+                />
+                ). Leave this page open and the payout appears here on its own -
+                no human involved.
+              </p>
+            ) : (
+              <p className="mt-1 text-sm text-foreground/80">
+                SPOTTER settles the payout the moment the pool period ends - no
+                human involved. Come back after the period closes and the payout
+                appears here.
+              </p>
+            )}
+          </div>
         ) : null}
 
         {failureMode === "evidence" ? (
@@ -292,6 +441,15 @@ function WearableCheckInner({
             >
               Check again
             </button>
+            {onSwitchToDocument !== undefined ? (
+              <button
+                type="button"
+                onClick={onSwitchToDocument}
+                className="w-full rounded-xl border border-edge px-5 py-3 text-sm font-semibold text-foreground hover:border-accent/50"
+              >
+                Upload proof instead
+              </button>
+            ) : null}
           </div>
         ) : null}
 
@@ -350,7 +508,9 @@ function WearableCheckInner({
     );
   }
 
-  const connection = connectionQuery.data;
+  const providerState = providerQuery.data;
+  const providerDown = providerDownReason(providerState);
+  const connected = providerConnected(providerState);
 
   return (
     <div className="space-y-3">
@@ -372,17 +532,50 @@ function WearableCheckInner({
         >
           Sign in to run the check
         </button>
-      ) : connectionQuery.isLoading ? (
+      ) : providerQuery.isLoading ? (
         <div className="space-y-2">
           <Skeleton className="h-12 w-full" />
           <p className="text-xs text-muted">Checking for a connected wearable</p>
         </div>
-      ) : connection === undefined || connection.kind !== "connected" ? (
+      ) : providerDown !== null ? (
+        // Dead end removed: while the provider refuses us, connecting a device
+        // cannot help and the connect call itself 502s. Say what is wrong and
+        // hand over the proof path that still works.
+        <div className="space-y-3">
+          <div className="rounded-xl border border-warning/40 bg-warning/10 p-4">
+            <p className="text-base font-semibold text-warning">
+              Wearable verification is down right now
+            </p>
+            <p className="mt-1 text-sm text-foreground/80">{providerDown}</p>
+            <p className="mt-2 text-sm text-foreground/80">
+              This is on us, not on your device. Connecting one would not change
+              it, so SPOTTER is not going to send you round that loop.
+            </p>
+          </div>
+          {onSwitchToDocument !== undefined ? (
+            <button
+              type="button"
+              onClick={onSwitchToDocument}
+              className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent"
+            >
+              Prove it with a document instead
+            </button>
+          ) : null}
+          <button
+            type="button"
+            onClick={() => {
+              void providerQuery.refetch();
+            }}
+            className="w-full rounded-xl border border-edge px-5 py-3 text-sm font-semibold text-foreground hover:border-accent/50"
+          >
+            Check the provider again
+          </button>
+        </div>
+      ) : !connected ? (
         <div className="space-y-3">
           <p className="rounded-xl border border-dashed border-accent/30 bg-accent-deep/20 p-3 text-sm text-accent">
-            {connection?.kind === "unavailable"
-              ? `${connection.reason} You can still connect a provider and retry.`
-              : "No wearable connected yet. Link WHOOP, Oura, Fitbit, or Garmin - without one, SPOTTER has nothing to verify and will not pay."}
+            No wearable connected yet. Link WHOOP, Oura, Fitbit, or Garmin -
+            without one, SPOTTER has nothing to verify and will not pay.
           </p>
           <button
             type="button"
@@ -403,12 +596,21 @@ function WearableCheckInner({
           <button
             type="button"
             onClick={() => {
-              void connectionQuery.refetch();
+              void providerQuery.refetch();
             }}
             className="w-full rounded-xl border border-edge px-5 py-3 text-sm font-semibold text-foreground hover:border-accent/50"
           >
             I connected it, check again
           </button>
+          {onSwitchToDocument !== undefined ? (
+            <button
+              type="button"
+              onClick={onSwitchToDocument}
+              className={`w-full rounded-xl text-muted hover:text-foreground ${TAP_TARGET}`}
+            >
+              Or upload a document instead
+            </button>
+          ) : null}
         </div>
       ) : (
         <button
@@ -450,9 +652,13 @@ function WearableCheckInner({
 export default function WearableCheck({
   poolId,
   goalSpec,
+  onSwitchToDocument,
 }: {
   poolId: bigint;
   goalSpec: string;
+  /** Switches the pool page to the document proof path. Absent when the pool
+   *  has no document tab to switch to. */
+  onSwitchToDocument?: () => void;
 }) {
   if (!DYNAMIC_CONFIGURED) {
     return (
@@ -462,5 +668,11 @@ export default function WearableCheck({
       />
     );
   }
-  return <WearableCheckInner poolId={poolId} goalSpec={goalSpec} />;
+  return (
+    <WearableCheckInner
+      poolId={poolId}
+      goalSpec={goalSpec}
+      onSwitchToDocument={onSwitchToDocument}
+    />
+  );
 }

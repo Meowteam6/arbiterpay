@@ -5,14 +5,40 @@
 // settled sit behind them, settled history last. The phase split lives in
 // lib/pool-lifecycle so this page, the pool detail, and goal matching can
 // never disagree about which pools are joinable.
+//
+// Two things the phase split alone cannot say, both of which were lying to
+// visitors, live in lib/pool-availability:
+//   - An expired pool nobody joined is not "awaiting settlement". settle() has
+//     nobody to pay, so it would sit under that heading forever promising a
+//     payout that will never come. Participant counts come off the chain.
+//   - A wearable goal cannot be verified while the wearable provider refuses
+//     us, and its entry fee is real money paid up front. Those pools come out
+//     of the joinable group for as long as the provider stays down; the state
+//     is read from the junction route, never hard-coded to a pool id.
 
 import Link from "next/link";
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import PoolCard from "@/components/PoolCard";
-import { Badge, EmptyState, ErrorNote, PoolCardSkeleton } from "@/components/ui";
-import { fetchPools, type PoolInfo } from "@/lib/contract";
+import {
+  Badge,
+  EmptyState,
+  ErrorNote,
+  PoolCardSkeleton,
+  TAP_TARGET,
+} from "@/components/ui";
+import { fetchParticipants, fetchPools, type PoolInfo } from "@/lib/contract";
 import { groupPoolsByPhase, type PoolPhase } from "@/lib/pool-lifecycle";
+import {
+  splitByVerifiability,
+  splitExpiredPools,
+} from "@/lib/pool-availability";
+import {
+  fetchProviderState,
+  providerDownReason,
+  providerQueryKey,
+} from "@/lib/wearable-provider";
+import { useEmbeddedWallet } from "@/lib/wallet";
 
 function PoolGrid({ pools, phase }: { pools: PoolInfo[]; phase: PoolPhase }) {
   return (
@@ -25,6 +51,8 @@ function PoolGrid({ pools, phase }: { pools: PoolInfo[]; phase: PoolPhase }) {
 }
 
 export default function PoolsPage() {
+  const { address } = useEmbeddedWallet();
+
   // The clock is read alongside the fetch, not during render, so grouping
   // stays pure and every card is classified against one snapshot. The query
   // client disables focus refetches, so a polling interval keeps the phase
@@ -42,6 +70,52 @@ export default function PoolsPage() {
     if (poolsQuery.data === undefined) return null;
     return groupPoolsByPhase(poolsQuery.data.pools, poolsQuery.data.asOfSeconds);
   }, [poolsQuery.data]);
+
+  // Only expired pools need a head count: it is what separates "settlement
+  // still has work to do here" from "this can never pay anyone". Live and
+  // settled pools are unaffected, so the read stays small.
+  const expiredIds = useMemo(
+    () => (grouped?.expired ?? []).map((pool) => pool.id.toString()),
+    [grouped],
+  );
+
+  const countsQuery = useQuery({
+    queryKey: ["expired-participant-counts", expiredIds.join(",")],
+    queryFn: async (): Promise<Record<string, number>> => {
+      const counted = await Promise.all(
+        expiredIds.map(async (poolId) => {
+          const participants = await fetchParticipants(BigInt(poolId));
+          return [poolId, participants.length] as const;
+        }),
+      );
+      return Object.fromEntries(counted);
+    },
+    enabled: expiredIds.length > 0,
+    staleTime: 5 * 60_000,
+  });
+
+  // Shares one query key with the dashboard and the pool page: same endpoint,
+  // one request per address. Without a wallet there is nobody to ask about, so
+  // the check stays disabled and nothing is held back on a guess.
+  const providerQuery = useQuery({
+    queryKey: providerQueryKey(address),
+    queryFn: () => {
+      if (address === null) throw new Error("No wallet connected.");
+      return fetchProviderState(address);
+    },
+    enabled: address !== null,
+    retry: false,
+  });
+  const providerDown = providerDownReason(providerQuery.data);
+
+  const liveSplit = splitByVerifiability(
+    grouped?.live ?? [],
+    providerDown !== null,
+  );
+  const expiredSplit = splitExpiredPools(
+    grouped?.expired ?? [],
+    (pool) => countsQuery.data?.[pool.id.toString()] ?? null,
+  );
 
   return (
     <div className="space-y-6">
@@ -61,7 +135,7 @@ export default function PoolsPage() {
         </div>
         <Link
           href="/pools/create"
-          className="rounded-xl bg-accent-strong px-4 py-2.5 text-sm font-semibold text-background hover:bg-accent"
+          className={`rounded-xl bg-accent-strong font-semibold text-background hover:bg-accent ${TAP_TARGET}`}
         >
           Create pool
         </Link>
@@ -106,22 +180,59 @@ export default function PoolsPage() {
             <p className="text-xs font-semibold uppercase tracking-wide text-muted">
               Live, open to join
             </p>
-            {grouped.live.length === 0 ? (
+            {liveSplit.verifiable.length === 0 ? (
               <p className="rounded-xl border border-dashed border-accent/30 bg-accent-deep/20 p-3 text-sm text-accent">
-                No live pools right now. Create one and put a goal on the
-                board.
+                {grouped.live.length === 0
+                  ? "No live pools right now. Create one and put a goal on the board."
+                  : "Every live pool right now is a wearable goal, and none of them can be verified until the provider is back. Create a document-verified pool and put a goal on the board."}
               </p>
             ) : (
-              <PoolGrid pools={grouped.live} phase="live" />
+              <PoolGrid pools={liveSplit.verifiable} phase="live" />
             )}
           </section>
 
-          {grouped.expired.length > 0 ? (
+          {providerDown !== null && liveSplit.unverifiable.length > 0 ? (
+            <section className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-warning">
+                Wearable goals - not joinable right now
+              </p>
+              <p className="rounded-xl border border-warning/40 bg-warning/10 p-3 text-sm text-foreground/80">
+                {providerDown} The entry fee is real money, so these are held
+                back until SPOTTER can check them again. Document-verified pools
+                run through the confidential attester and are unaffected.
+              </p>
+              {/* Dimmed and moved out of the joinable group, but still
+                  readable: the pool page repeats the reason and withholds the
+                  join action there too. */}
+              <div className="opacity-60">
+                <PoolGrid pools={liveSplit.unverifiable} phase="live" />
+              </div>
+            </section>
+          ) : null}
+
+          {expiredSplit.awaitingSettlement.length > 0 ? (
             <section className="space-y-3">
               <p className="text-xs font-semibold uppercase tracking-wide text-muted">
                 Ended, awaiting settlement
               </p>
-              <PoolGrid pools={grouped.expired} phase="expired" />
+              <PoolGrid
+                pools={expiredSplit.awaitingSettlement}
+                phase="expired"
+              />
+            </section>
+          ) : null}
+
+          {expiredSplit.closedEmpty.length > 0 ? (
+            <section className="space-y-3">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+                Closed, nobody joined
+              </p>
+              <p className="text-sm text-muted">
+                Their period ended with no participants on record. settle() has
+                nobody to pay in these, so nothing is pending - they stay here
+                as history.
+              </p>
+              <PoolGrid pools={expiredSplit.closedEmpty} phase="expired" />
             </section>
           ) : null}
 

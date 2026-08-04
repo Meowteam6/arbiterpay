@@ -197,8 +197,14 @@ function SpendRow({ row }: { row: SpendReceiptRow }) {
   const note = noteWithoutGatewayRef(row.note);
   return (
     <li className="animate-rise-in">
+      {/* Both columns must be able to shrink at 375px. The left label carries
+          strings as long as "chain verification read (QuickNode, x402)" and
+          needs min-w-0 or it refuses to wrap and pushes the row wider than the
+          card; the right column must not be whitespace-nowrap for the same
+          reason. Only the amount itself stays unbreakable - a money figure
+          split across two lines is worse than a wrap anywhere else. */}
       <div className="flex items-baseline justify-between gap-3">
-        <span className="text-sm font-medium">
+        <span className="min-w-0 break-words text-sm font-medium">
           {row.paidUsd !== null ? (
             <span aria-hidden className="mr-2 text-accent">
               [x]
@@ -215,36 +221,43 @@ function SpendRow({ row }: { row: SpendReceiptRow }) {
             </span>
           ) : null}
         </span>
-        <span className="whitespace-nowrap text-sm">
+        <span className="min-w-0 text-right text-sm">
           {row.paidUsd !== null ? (
             <>
-              <Money usd={row.paidUsd} size="sm" />{" "}
+              <span className="whitespace-nowrap">
+                <Money usd={row.paidUsd} size="sm" />
+              </span>{" "}
               {row.settlement === "x402" ? (
-                <span className="text-xs text-muted">
+                <span className="whitespace-nowrap text-xs text-muted">
                   paid via x402
-                  {gatewayRef !== null ? (
-                    <>
-                      {" · "}
-                      <span className="font-mono" title={gatewayRef}>
-                        {shortRef(gatewayRef)}
-                      </span>
-                    </>
-                  ) : null}
                 </span>
               ) : row.settlement === "prepaid" ? (
                 <span className="text-xs text-muted">metered</span>
               ) : null}
             </>
           ) : row.estUsd !== null ? (
-            <>
+            <span className="whitespace-nowrap">
               <span className="text-xs text-muted">est</span>{" "}
               <Money usd={row.estUsd} size="sm" />
-            </>
+            </span>
           ) : null}
         </span>
       </div>
+      {/* The gateway reference gets its own line rather than trailing the
+          amount: a 15-character mono ref cannot fit beside a price inside a
+          311px content box, and it is a proof link, not a price. */}
+      {gatewayRef !== null ? (
+        <p className="mt-1 pl-7 text-xs text-muted">
+          gateway tx{" "}
+          <span className="break-all font-mono" title={gatewayRef}>
+            {shortRef(gatewayRef)}
+          </span>
+        </p>
+      ) : null}
       {note !== null ? (
-        <p className="mt-1 pl-7 text-sm text-foreground/80">{note}</p>
+        <p className="mt-1 break-words pl-7 text-sm text-foreground/80">
+          {note}
+        </p>
       ) : null}
     </li>
   );
@@ -263,16 +276,19 @@ function ErrorRow({
   return (
     <li className="animate-rise-in pl-7 text-sm">
       <details>
+        {/* min-h-11 keeps the disclosure a real 44px thumb target; the flex
+            wrap lets the label and the "details" affordance stack at 375px
+            instead of forcing the row wider than the card. */}
         <summary
-          className={`cursor-pointer list-none [&::-webkit-details-marker]:hidden ${
+          className={`flex min-h-11 cursor-pointer list-none flex-wrap items-center gap-x-2 [&::-webkit-details-marker]:hidden ${
             transient ? "text-muted" : "text-danger"
           }`}
         >
-          {label}
+          <span className="min-w-0 break-words">{label}</span>
           {count > 1 ? (
-            <span className="ml-2 text-xs text-muted">tried {count} times</span>
+            <span className="text-xs text-muted">tried {count} times</span>
           ) : null}
-          <span className="ml-2 text-xs text-muted underline decoration-dotted">
+          <span className="text-xs text-muted underline decoration-dotted">
             details
           </span>
         </summary>

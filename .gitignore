@@ -30,3 +30,7 @@ cre/wf-goal-verification/.cre_build_tmp.js
 *.pem
 *-recovery-file.json
 .gstack/
+
+# local agent-ledger scratch used by e2e runs
+app/.data/
+app/.data-e2e/

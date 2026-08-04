@@ -7,32 +7,14 @@ import {
   evm,
   type UnlinkClient,
 } from "@unlink-xyz/sdk/client";
-import {
-  createWalletClient,
-  createPublicClient,
-  defineChain,
-  http,
-  type Hex,
-} from "viem";
+import { type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { requireEnv, optionalEnv } from "@/lib/server/env";
+import { arcPublicClient, arcWalletClient } from "@/lib/server/arc-client";
+import { requireEnv } from "@/lib/server/env";
 import { unlinkAdmin, unlinkEndpoint } from "@/lib/server/unlink-admin";
 
 export const ARC_USDC_ADDRESS =
   "0x3600000000000000000000000000000000000000";
-
-function arcChain() {
-  const rpcUrl = optionalEnv("ARC_RPC_URL", "https://rpc.testnet.arc.network");
-  return defineChain({
-    id: 5042002,
-    name: "Arc Testnet",
-    nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
-    rpcUrls: { default: { http: [rpcUrl] } },
-    blockExplorers: {
-      default: { name: "Arcscan", url: "https://testnet.arcscan.app" },
-    },
-  });
-}
 
 /**
  * Treasury client: uses the platform's mnemonic-derived Unlink account and
@@ -47,13 +29,11 @@ export function treasuryUnlinkClient(): UnlinkClient {
   const evmAccount = privateKeyToAccount(
     (pk.startsWith("0x") ? pk : `0x${pk}`) as Hex,
   );
-  const chain = arcChain();
-  const walletClient = createWalletClient({
-    account: evmAccount,
-    chain,
-    transport: http(),
-  });
-  const publicClient = createPublicClient({ chain, transport: http() });
+  // Shared Arc clients (fallback + batching) rather than a fresh single-RPC
+  // pair per call — a Permit2 deposit signature is a money path and must not
+  // hang on one rate-limited endpoint.
+  const walletClient = arcWalletClient(evmAccount);
+  const publicClient = arcPublicClient();
 
   const treasuryAccount = account.fromMnemonic({
     mnemonic: requireEnv("UNLINK_TREASURY_MNEMONIC"),
