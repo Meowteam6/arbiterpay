@@ -30,7 +30,9 @@ vi.mock("@/lib/server/pools", () => ({
   participantJoined: (...args: unknown[]) => participantJoined(...args),
 }));
 
-const { MAX_EVIDENCE_BASE64_CHARS } = await import("@/lib/server/evidence");
+const { MAX_EVIDENCE_BASE64_CHARS, attesterJobIsForClaim } = await import(
+  "@/lib/server/evidence"
+);
 const { POST } = await import("@/app/api/evidence/submit/route");
 
 const USER = "0x8ba1f109551bD432803012645Ac136ddd64DBA72";
@@ -195,6 +197,31 @@ describe("POST /api/evidence/submit", () => {
     const body = (await res.json()) as { error: string };
     expect(body.error).not.toMatch(/ECONNREFUSED|rpc\.internal|0xdeadbeef/);
     expect(body.error).toMatch(/evidence-submit-/);
+  });
+
+  it("records the attester job against this claim, and only this claim", async () => {
+    submitInference.mockResolvedValue("att-owned");
+
+    const res = await submit(GOOD_BODY);
+
+    expect(res.status).toBe(200);
+    // The run route's ownership check must accept it for this claim...
+    expect(await attesterJobIsForClaim("att-owned", 7n, USER)).toBe(true);
+    // ...and refuse it for another pool or another member of the same pool.
+    expect(await attesterJobIsForClaim("att-owned", 9n, USER)).toBe(false);
+    expect(
+      await attesterJobIsForClaim(
+        "att-owned",
+        7n,
+        "0x70997970C51812dc3A010C7d01b50e0d17dc79C8",
+      ),
+    ).toBe(false);
+  });
+
+  it("matches the recorded participant regardless of address casing", async () => {
+    submitInference.mockResolvedValue("att-case");
+    await submit({ ...GOOD_BODY, address: USER.toLowerCase() });
+    expect(await attesterJobIsForClaim("att-case", 7n, USER)).toBe(true);
   });
 
   it("rejects a malformed address before reading the chain", async () => {

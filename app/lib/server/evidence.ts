@@ -13,9 +13,35 @@
 // the magic-byte comparison are the parts worth pinning in unit tests, and
 // vitest here is node-env .ts only.
 
+import { createHash } from "crypto";
+import {
+  BaseError,
+  ContractFunctionRevertedError,
+  type Address,
+} from "viem";
 import { fetchPool, type PoolInfo } from "@/lib/contract";
 import { errorMessage } from "@/lib/server/http";
+import { readJson, writeJson } from "@/lib/server/store";
 import type { SupportedContentType } from "@/lib/server/judge";
+
+/**
+ * Whether a failed pool read is HealthPools saying "no such pool".
+ *
+ * The decoded revert is the authority: viem parses `require(..., "NO_POOL")`
+ * into ContractFunctionRevertedError.reason, and would parse a future custom
+ * error into data.errorName. The message substring is only a fallback for a
+ * transport that hands back an already-flattened error, so a formatting change
+ * inside viem cannot silently turn a missing pool into a 500.
+ */
+function isMissingPool(err: unknown): boolean {
+  if (err instanceof BaseError) {
+    const revert = err.walk((e) => e instanceof ContractFunctionRevertedError);
+    if (revert instanceof ContractFunctionRevertedError) {
+      return revert.reason === "NO_POOL" || revert.data?.errorName === "NO_POOL";
+    }
+  }
+  return errorMessage(err).includes("NO_POOL");
+}
 
 /**
  * Read a pool from the chain, or null when no such pool exists.
@@ -31,7 +57,7 @@ export async function loadClaimPool(poolId: bigint): Promise<PoolInfo | null> {
   try {
     return await fetchPool(poolId);
   } catch (err) {
-    if (errorMessage(err).includes("NO_POOL")) return null;
+    if (isMissingPool(err)) return null;
     throw err;
   }
 }
@@ -86,20 +112,22 @@ export function checkEvidenceFile(
   fileBase64: string,
   contentType: SupportedContentType,
 ): EvidenceCheck {
-  // Length first, before any allocation: this is the check that stops a
-  // deliberately enormous body from being expanded server-side.
-  if (fileBase64.length > MAX_EVIDENCE_BASE64_CHARS) {
+  // Strip first, then measure. RFC 2045 encoders wrap base64 at 76 columns,
+  // so a legitimate near-8 MB record carries ~150 KB of line breaks; measuring
+  // the raw string would reject it for a size it does not have. Stripping is
+  // a linear pass over a string already in memory - the length gate that
+  // follows is still what stops an enormous payload from being decoded.
+  const normalized = fileBase64.replace(/\s+/g, "");
+  if (normalized === "") {
+    return { ok: false, message: "That file was empty." };
+  }
+  if (normalized.length > MAX_EVIDENCE_BASE64_CHARS) {
     return {
       ok: false,
       message: `That file is too large. Records must be under ${Math.floor(
         MAX_EVIDENCE_BYTES / (1024 * 1024),
       )} MB.`,
     };
-  }
-
-  const normalized = fileBase64.replace(/\s+/g, "");
-  if (normalized === "") {
-    return { ok: false, message: "That file was empty." };
   }
   if (normalized.length % 4 !== 0 || !BASE64_RE.test(normalized)) {
     return { ok: false, message: "That file was not valid base64." };
@@ -138,6 +166,82 @@ export function checkEvidenceFile(
   }
 
   return { ok: true, bytes: decoded.length };
+}
+
+// ------------------------------------------------- attester job ownership
+//
+// An attester job id is the receipt for one TEE inference, and the run route
+// pays out on whatever verdict that job returns. Nothing tied a job to the
+// claim it was submitted for: the run route accepted any attesterId as long
+// as the caller had joined a pool matching the goalId in the path. Two
+// participants in the SAME pool share one goalSpec, so if A uploaded a real
+// record and their job id leaked or was shared, B could POST their own
+// goalId with A's attesterId and be paid off A's evidence without uploading
+// anything. The ledger's spend dedupe does not help: it is scoped to one
+// goalId, and B's replay happens under a different one.
+//
+// So the submit route records who a job belongs to, and the run route checks
+// it before polling or spending.
+
+/** The claim an attester job was submitted for. */
+export interface AttesterJobClaim {
+  poolId: string;
+  participant: string;
+  at: string;
+}
+
+/** Store key for one job. The id is caller-supplied on the read path and the
+ *  file store joins the key onto a directory, so it is hashed rather than
+ *  interpolated: a lookup can never walk out of the data directory. */
+function attesterJobFile(attesterId: string): string {
+  const key = createHash("sha256").update(attesterId).digest("hex");
+  return `attester-job-${key}.json`;
+}
+
+/** Record which claim an attester job was submitted for. Written by the
+ *  evidence route the moment the job id comes back, before the caller sees
+ *  it, so the run route can never race ahead of the record. */
+export async function rememberAttesterJob(
+  attesterId: string,
+  poolId: bigint,
+  participant: Address,
+): Promise<void> {
+  const claim: AttesterJobClaim = {
+    poolId: poolId.toString(),
+    participant: participant.toLowerCase(),
+    at: new Date().toISOString(),
+  };
+  await writeJson(attesterJobFile(attesterId), claim);
+}
+
+/**
+ * Whether this attester job was submitted for exactly this claim.
+ *
+ * False for a job belonging to another pool or another participant, for a job
+ * this server never issued, and for a corrupt record. Fail closed: an
+ * unrecognised job must not be paid out on, and re-uploading the record costs
+ * the participant one submission.
+ */
+export async function attesterJobIsForClaim(
+  attesterId: string,
+  poolId: bigint,
+  participant: Address,
+): Promise<boolean> {
+  const claim = await readJson<AttesterJobClaim | null>(
+    attesterJobFile(attesterId),
+    null,
+  );
+  if (
+    claim === null ||
+    typeof claim.poolId !== "string" ||
+    typeof claim.participant !== "string"
+  ) {
+    return false;
+  }
+  return (
+    claim.poolId === poolId.toString() &&
+    claim.participant === participant.toLowerCase()
+  );
 }
 
 /**

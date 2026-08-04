@@ -7,8 +7,10 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   MAX_EVIDENCE_BASE64_CHARS,
   MAX_EVIDENCE_BYTES,
+  attesterJobIsForClaim,
   checkEvidenceFile,
   goalSpecDiffers,
+  rememberAttesterJob,
   serverEvidenceFileName,
 } from "@/lib/server/evidence";
 
@@ -83,6 +85,32 @@ describe("checkEvidenceFile", () => {
     expect(checkEvidenceFile(wrapped, "image/png").ok).toBe(true);
   });
 
+  it("does not count line breaks toward the size cap", () => {
+    // RFC 2045 wraps at 76 columns. A file just inside the byte cap carries
+    // ~150 KB of breaks; measuring the raw string would reject it for a size
+    // it does not have.
+    const bytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(MAX_EVIDENCE_BYTES - 8, 7),
+    ]);
+    const wrapped = bytes.toString("base64").replace(/(.{76})/g, "$1\r\n");
+    expect(wrapped.length).toBeGreaterThan(MAX_EVIDENCE_BASE64_CHARS);
+
+    const result = checkEvidenceFile(wrapped, "image/png");
+
+    expect(result).toEqual({ ok: true, bytes: MAX_EVIDENCE_BYTES });
+  });
+
+  it("still rejects a payload that is genuinely over the cap", () => {
+    const bytes = Buffer.concat([
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      Buffer.alloc(MAX_EVIDENCE_BYTES, 7),
+    ]);
+    const result = checkEvidenceFile(bytes.toString("base64"), "image/png");
+    expect(result.ok).toBe(false);
+    if (!result.ok) expect(result.message).toMatch(/too large/i);
+  });
+
   it("rejects a truncated signature", () => {
     const twoBytes = Buffer.from([0x89, 0x50]).toString("base64");
     expect(checkEvidenceFile(twoBytes, "image/png").ok).toBe(false);
@@ -98,6 +126,35 @@ describe("serverEvidenceFileName", () => {
     expect(serverEvidenceFileName("image/jpeg")).toMatch(/\.jpg$/);
     expect(serverEvidenceFileName("application/pdf")).toMatch(/\.pdf$/);
     expect(serverEvidenceFileName("text/plain")).toMatch(/\.txt$/);
+  });
+});
+
+describe("attester job ownership", () => {
+  const A = "0x8ba1f109551bD432803012645Ac136ddd64DBA72" as const;
+  const B = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8" as const;
+
+  it("matches only the claim that submitted the job", async () => {
+    await rememberAttesterJob("job-1", 7n, A);
+
+    expect(await attesterJobIsForClaim("job-1", 7n, A)).toBe(true);
+    // Same pool, different member: this is the replay the check exists for.
+    expect(await attesterJobIsForClaim("job-1", 7n, B)).toBe(false);
+    // Same member, different pool.
+    expect(await attesterJobIsForClaim("job-1", 9n, A)).toBe(false);
+  });
+
+  it("fails closed for a job the server never issued", async () => {
+    expect(await attesterJobIsForClaim("job-never-issued", 7n, A)).toBe(false);
+  });
+
+  it("cannot be steered out of the data directory by the job id", async () => {
+    // The id is caller-supplied on the read path; a traversal attempt must
+    // simply miss rather than read some other file.
+    expect(
+      await attesterJobIsForClaim("../../../etc/passwd", 7n, A),
+    ).toBe(false);
+    await rememberAttesterJob("../../evil", 7n, A);
+    expect(await attesterJobIsForClaim("../../evil", 7n, A)).toBe(true);
   });
 });
 

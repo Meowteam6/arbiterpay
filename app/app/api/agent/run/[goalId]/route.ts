@@ -25,6 +25,11 @@
 // checked before the plan entry lands, so a stranger's request never causes
 // SPOTTER to spend anything.
 //
+// A document claim's attesterId must also be a job THIS claim submitted
+// (evidence.ts records the owner at submit time). Everyone in a pool shares
+// its goalSpec, so a job id that leaked between two participants would
+// otherwise let one collect on the other's evidence.
+//
 // Request JSON:
 //   { attesterId?, poolId, address, goalSpec? (ignored), evidenceKind? }
 // Document claims require attesterId (the TEE inference job). Wearable claims
@@ -49,7 +54,11 @@ import { arcReader, type ArcReader } from "@/lib/server/agent/spotter";
 import { liveBuyDeps } from "@/lib/server/agent/x402";
 import { geminiReason } from "@/lib/server/agent/reason";
 import { wearableEvidenceSource } from "@/lib/server/agent/wearable";
-import { goalSpecDiffers, loadClaimPool } from "@/lib/server/evidence";
+import {
+  attesterJobIsForClaim,
+  goalSpecDiffers,
+  loadClaimPool,
+} from "@/lib/server/evidence";
 import { pollInference, type PollResult } from "@/lib/server/judge";
 import { participantJoined } from "@/lib/server/pools";
 import { recordResult } from "@/lib/server/oracle";
@@ -209,6 +218,23 @@ export async function POST(request: Request, ctx: Ctx) {
       });
     } else {
       attesterId = body.attesterId as string;
+      // Ownership, not just existence: the verdict this job returns is what
+      // gets paid out, so it must be the job THIS claim submitted. Two
+      // participants in one pool share a goalSpec, so without this check a
+      // leaked or shared job id lets one of them collect on the other's
+      // evidence. Checked before the poll and before any spend.
+      if (
+        !(await attesterJobIsForClaim(
+          attesterId,
+          BigInt(poolId),
+          address as Address,
+        ))
+      ) {
+        return jsonError(
+          400,
+          "That verification job does not belong to this claim. Upload the record for this pool again.",
+        );
+      }
       poll = pollInference;
     }
 

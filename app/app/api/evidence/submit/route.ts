@@ -27,6 +27,12 @@
 // against the declared content type. The browser's checks are a courtesy to
 // the person uploading; these are the rule.
 //
+// The attester job id this route returns is recorded against (poolId,
+// address) before it is handed out. The run route pays on whatever verdict a
+// job returns, and everyone in a pool shares its goalSpec, so an
+// unattributed job id would let one participant collect on another's
+// evidence.
+//
 // Request JSON:
 //   { poolId: number|string, address: string, goalSpec?: string (ignored),
 //     fileBase64: string, fileName?: string (ignored), contentType: string }
@@ -49,6 +55,7 @@ import {
   checkEvidenceFile,
   goalSpecDiffers,
   loadClaimPool,
+  rememberAttesterJob,
   serverEvidenceFileName,
 } from "@/lib/server/evidence";
 import {
@@ -57,6 +64,7 @@ import {
   type SupportedContentType,
 } from "@/lib/server/judge";
 import {
+  errorMessage,
   jsonError,
   newCorrelationId,
   readJsonBody,
@@ -148,6 +156,24 @@ export async function POST(request: Request) {
       serverEvidenceFileName(contentType as SupportedContentType),
       contentType as SupportedContentType,
     );
+
+    // The job belongs to this claim and no other. Written before the id is
+    // handed out, so the run route can never see a job it cannot attribute.
+    try {
+      await rememberAttesterJob(attesterId, BigInt(poolId), address as Address);
+    } catch (err) {
+      // The inference is already running, but an unattributable job is one
+      // the run route will refuse. Say so instead of returning a dead id.
+      console.error(
+        `[${cid}] attester job ${attesterId} could not be linked to pool ` +
+          `${poolId}: ${errorMessage(err)}`,
+        err,
+      );
+      return jsonError(
+        503,
+        "Verification started but could not be linked to your claim. Nothing was recorded. Please submit again.",
+      );
+    }
 
     return Response.json({ attesterId });
   } catch (err) {

@@ -9,11 +9,15 @@
 //     (poolId, address), and the answer is never echoed back to a caller who
 //     guessed wrong.
 //   - a non-participant is turned away BEFORE the run loop can plan or spend.
+//   - an attesterId is only accepted for the claim that submitted it. Pool
+//     members share one goalSpec, so a leaked job id would otherwise let one
+//     member be paid off another member's evidence.
 //   - the GET side is redacted: model prose about a medical document never
 //     leaves the server on an unauthenticated endpoint.
 //   - a thrown failure reaches the caller as a reference, not as its text.
 
 import { describe, it, expect, vi, beforeEach } from "vitest";
+import { ContractFunctionRevertedError } from "viem";
 
 const runAgentForGoal = vi.fn();
 const computeGoalId = vi.fn();
@@ -57,6 +61,9 @@ vi.mock("@/lib/server/pools", () => ({
 }));
 
 const { appendLedger } = await import("@/lib/server/agent/ledger");
+// Real store-backed ownership records: the binding is the fix under test, so
+// the test seeds it the same way the evidence route does.
+const { rememberAttesterJob } = await import("@/lib/server/evidence");
 const { GET, POST } = await import("@/app/api/agent/run/[goalId]/route");
 
 const GOAL = "0x" + "ab".repeat(32);
@@ -105,12 +112,14 @@ const GOOD_BODY = {
   goalSpec: CHAIN_DOC_GOAL,
 };
 
-beforeEach(() => {
+beforeEach(async () => {
   vi.clearAllMocks();
   computeGoalId.mockResolvedValue(GOAL);
   runAgentForGoal.mockResolvedValue({ status: "verifying", ledger: [] });
   fetchPool.mockResolvedValue(pool());
   participantJoined.mockResolvedValue(true);
+  // "att-1" is the job GOOD_BODY's claim submitted: pool 7, this address.
+  await rememberAttesterJob("att-1", 7n, USER);
 });
 
 describe("POST /api/agent/run/[goalId]", () => {
@@ -238,12 +247,74 @@ describe("POST /api/agent/run/[goalId]", () => {
     expect(runAgentForGoal).not.toHaveBeenCalled();
   });
 
+  it("refuses another participant's attester job for the same pool", async () => {
+    // The exploit: A and B are both in pool 7, so they share one goalSpec. B
+    // posts their OWN goalId with A's job id and would be paid off A's
+    // evidence without uploading anything.
+    const other = "0x70997970C51812dc3A010C7d01b50e0d17dc79C8";
+    await rememberAttesterJob("att-of-A", 7n, other as `0x${string}`);
+
+    const res = await post(GOAL, { ...GOOD_BODY, attesterId: "att-of-A" });
+
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/does not belong to this claim/);
+    expect(runAgentForGoal).not.toHaveBeenCalled();
+  });
+
+  it("refuses an attester job submitted for a different pool", async () => {
+    await rememberAttesterJob("att-pool-9", 9n, USER);
+    const res = await post(GOAL, { ...GOOD_BODY, attesterId: "att-pool-9" });
+    expect(res.status).toBe(400);
+    expect(runAgentForGoal).not.toHaveBeenCalled();
+  });
+
+  it("refuses an attester job this server never issued", async () => {
+    const res = await post(GOAL, { ...GOOD_BODY, attesterId: "att-invented" });
+    expect(res.status).toBe(400);
+    expect(runAgentForGoal).not.toHaveBeenCalled();
+  });
+
+  it("accepts the job the claim actually submitted", async () => {
+    const res = await post(GOAL, GOOD_BODY);
+    expect(res.status).toBe(200);
+    const input = runAgentForGoal.mock.calls[0][1] as { attesterId: string };
+    expect(input.attesterId).toBe("att-1");
+  });
+
   it("rejects a pool that does not exist", async () => {
+    // The shape viem actually throws: a decoded require-string revert.
+    fetchPool.mockRejectedValue(
+      new ContractFunctionRevertedError({
+        abi: [],
+        functionName: "getPool",
+        message: "NO_POOL",
+      }),
+    );
+    const res = await post(GOAL, GOOD_BODY);
+    expect(res.status).toBe(400);
+    expect(runAgentForGoal).not.toHaveBeenCalled();
+  });
+
+  it("still recognises a flattened NO_POOL error from a transport", async () => {
     fetchPool.mockRejectedValue(
       new Error('execution reverted: "NO_POOL" ... revert'),
     );
     const res = await post(GOAL, GOOD_BODY);
     expect(res.status).toBe(400);
+    expect(runAgentForGoal).not.toHaveBeenCalled();
+  });
+
+  it("does not mistake an unrelated revert for a missing pool", async () => {
+    fetchPool.mockRejectedValue(
+      new ContractFunctionRevertedError({
+        abi: [],
+        functionName: "getPool",
+        message: "SETTLED",
+      }),
+    );
+    const res = await post(GOAL, GOOD_BODY);
+    expect(res.status).toBe(500);
     expect(runAgentForGoal).not.toHaveBeenCalled();
   });
 
