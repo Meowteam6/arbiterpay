@@ -10,11 +10,34 @@
 //   2. Spends stop dead at the per-claim USDC cap frozen into the plan.
 // A violating entry throws LedgerInvariantError and persists nothing.
 //
-// Built on store.ts (Upstash Redis in prod, tmpdir JSON locally). Append is
-// read-modify-write, not atomic - acceptable at demo scale because each goalId
-// is driven by a single polling client; revisit if runs ever race.
+// Built on store.ts (Upstash Redis in prod, JSON files locally). Storage is
+// append-only at the store level: one entry per RPUSH, one index member per
+// ZADD. The previous shape read the whole ledger array, appended and wrote it
+// back, so two concurrent appends dropped one of the entries - and a dropped
+// "record" entry strands a claim outside the settlement sweep forever while a
+// dropped "settled" entry shows a paid user an error screen forever. The index
+// was worse: one global blob, so two users claiming in the same second lost
+// one of them from the feed and the sweep silently.
+//
+// Appends that carry an invariant (plan, spend) additionally take a per-goal
+// lock, because RPUSH alone cannot enforce "one plan" or "stop at the cap":
+// two concurrent spends would each read the same total and each decide they
+// fit. Appends with no invariant (verdict, reason, record, settle, error) skip
+// the lock - RPUSH is already atomic and they are the ones that must never be
+// delayed on a money path.
+//
+// The exported API and the LedgerEntry union are frozen: other modules code
+// against them. Storage changed; shapes and signatures did not.
 
-import { readJson, writeJson } from "@/lib/server/store";
+import {
+  appendJson,
+  appendJsonAll,
+  readJson,
+  readJsonList,
+  withLock,
+  zaddNx,
+  zrevrange,
+} from "@/lib/server/store";
 import { optionalEnv } from "@/lib/server/env";
 import type { Confidence } from "@/lib/server/judge";
 
@@ -103,33 +126,82 @@ export type LedgerEntryInput = LedgerEntry extends infer E
 
 export class LedgerInvariantError extends Error {}
 
-function ledgerFile(goalId: string): string {
+/** Append-only list of entries for one claim. */
+function ledgerListKey(goalId: string): string {
+  return `agent-ledger-${goalId.toLowerCase()}.jsonl`;
+}
+
+/** Pre-migration whole-blob ledger. Still read so nothing already written is
+ *  orphaned; copied into the list the first time the claim is appended to. */
+function legacyLedgerFile(goalId: string): string {
   return `agent-ledger-${goalId.toLowerCase()}.json`;
 }
 
+function ledgerLockName(goalId: string): string {
+  return `agent-ledger:${goalId.toLowerCase()}`;
+}
+
+// Long enough to cover a slow Redis round trip, short enough that a lambda
+// killed mid-append does not block the next one for long.
+const LEDGER_LOCK_TTL_MS = 5_000;
+
 // The store is key/value with no scan, so the /agent feed needs its own
-// index: one entry per claim, written when the claim's plan lands (the plan
-// is every claim's first entry, so one index write per claim, ever).
-const LEDGER_INDEX_FILE = "agent-ledger-index.json";
+// index: one member per claim, added when the claim's plan lands (the plan is
+// every claim's first entry, so one index write per claim, ever). A sorted set
+// scored by timestamp is idempotent by member, which is what removes both the
+// read-then-dedupe pass and the whole-blob rewrite.
+const LEDGER_INDEX_KEY = "agent-ledger-index.zset";
+
+/** Pre-migration index blob, merged in on read so older claims keep showing
+ *  up in the feed and the settlement sweep. */
+const LEGACY_LEDGER_INDEX_FILE = "agent-ledger-index.json";
 
 export interface LedgerIndexEntry {
   goalId: string;
   at: string;
 }
 
+// Sorted-set scores are milliseconds, so two claims planned inside the same
+// millisecond would tie and order arbitrarily. Nudging the score forward keeps
+// insertion order stable for everything one process indexed; across instances
+// a tie is harmless because both entries still appear.
+let lastIndexScore = 0;
+
+function indexScore(at: string): number {
+  const ms = Date.parse(at);
+  const score = ms > lastIndexScore ? ms : lastIndexScore + 0.001;
+  lastIndexScore = score;
+  return score;
+}
+
 /** Claims SPOTTER has touched, most recent first. */
 export async function listLedgerGoalIds(
   limit = 20,
 ): Promise<LedgerIndexEntry[]> {
-  const index = await readJson<LedgerIndexEntry[]>(LEDGER_INDEX_FILE, []);
-  return index.slice(0, limit);
+  if (limit <= 0) return [];
+
+  const merged = new Map<string, LedgerIndexEntry>();
+  for (const { member, score } of await zrevrange(LEDGER_INDEX_KEY, limit)) {
+    merged.set(member, {
+      goalId: member,
+      at: new Date(Math.floor(score)).toISOString(),
+    });
+  }
+  for (const entry of await readJson<LedgerIndexEntry[]>(
+    LEGACY_LEDGER_INDEX_FILE,
+    [],
+  )) {
+    if (!merged.has(entry.goalId)) merged.set(entry.goalId, entry);
+  }
+
+  // Stable sort: ties keep the sorted set's own (sub-millisecond) ordering.
+  return [...merged.values()]
+    .sort((a, b) => Date.parse(b.at) - Date.parse(a.at))
+    .slice(0, limit);
 }
 
 async function indexGoal(goalId: string, at: string): Promise<void> {
-  const index = await readJson<LedgerIndexEntry[]>(LEDGER_INDEX_FILE, []);
-  const key = goalId.toLowerCase();
-  if (index.some((entry) => entry.goalId === key)) return;
-  await writeJson(LEDGER_INDEX_FILE, [{ goalId: key, at }, ...index]);
+  await zaddNx(LEDGER_INDEX_KEY, goalId.toLowerCase(), indexScore(at));
 }
 
 /** Whole-cent USD amounts only; anything else is a bug upstream. */
@@ -152,8 +224,22 @@ export function defaultClaimCapUsd(): string {
   return optionalEnv("AGENT_CLAIM_CAP_USD", DEFAULT_CLAIM_CAP_USD);
 }
 
+interface LedgerState {
+  entries: LedgerEntry[];
+  /** Entries came from the pre-migration blob and are not in the list yet. */
+  fromLegacy: boolean;
+}
+
+async function loadLedger(goalId: string): Promise<LedgerState> {
+  const entries = await readJsonList<LedgerEntry>(ledgerListKey(goalId));
+  if (entries.length > 0) return { entries, fromLegacy: false };
+
+  const legacy = await readJson<LedgerEntry[]>(legacyLedgerFile(goalId), []);
+  return { entries: legacy, fromLegacy: legacy.length > 0 };
+}
+
 export async function readLedger(goalId: string): Promise<LedgerEntry[]> {
-  return readJson<LedgerEntry[]>(ledgerFile(goalId), []);
+  return (await loadLedger(goalId)).entries;
 }
 
 export function totalSpentUsd(entries: LedgerEntry[]): string {
@@ -221,21 +307,58 @@ function assertAppendAllowed(
   }
 }
 
+function stamp(entry: LedgerEntryInput): LedgerEntry {
+  return { ...entry, at: new Date().toISOString() } as LedgerEntry;
+}
+
 /**
  * Append one entry, enforcing the plan-before-spend and cap invariants.
  * Returns the full ledger including the new entry.
+ *
+ * Entries that carry an invariant, and the one-time copy of a pre-migration
+ * ledger into the list, run under a per-goal lock so two concurrent callers
+ * cannot each decide a spend fits under the cap. Everything else appends
+ * straight through: RPUSH is atomic, so nothing is lost.
  */
 export async function appendLedger(
   goalId: string,
   entry: LedgerEntryInput,
 ): Promise<LedgerEntry[]> {
-  const entries = await readLedger(goalId);
-  assertAppendAllowed(entries, entry);
-  const stamped = { ...entry, at: new Date().toISOString() } as LedgerEntry;
-  const next = [...entries, stamped];
-  await writeJson(ledgerFile(goalId), next);
-  if (stamped.kind === "plan") {
-    await indexGoal(goalId, stamped.at);
+  const state = await loadLedger(goalId);
+  const guarded =
+    state.fromLegacy || entry.kind === "plan" || entry.kind === "spend";
+
+  if (!guarded) {
+    assertAppendAllowed(state.entries, entry);
+    const stamped = stamp(entry);
+    await appendJson(ledgerListKey(goalId), stamped);
+    return [...state.entries, stamped];
   }
-  return next;
+
+  return withLock(ledgerLockName(goalId), LEDGER_LOCK_TTL_MS, async () => {
+    // Re-read inside the lock: whoever held it before us may have appended.
+    const fresh = await loadLedger(goalId);
+    if (fresh.fromLegacy) {
+      // Move the old blob into the list before appending, or the list would
+      // read as a ledger with no plan and every later invariant check would
+      // be made against a truncated history. The blob is left in place; once
+      // the list is non-empty it is never read again.
+      await appendJsonAll(ledgerListKey(goalId), fresh.entries);
+    }
+
+    assertAppendAllowed(fresh.entries, entry);
+    const stamped = stamp(entry);
+
+    // Index BEFORE the append. These are two commands and a process that dies
+    // between them has to fail in the recoverable direction: an indexed goal
+    // with no entries yet is skipped by the sweep and renders as an empty
+    // claim, and the retry re-appends the plan under the original score. The
+    // other order strands a planned claim outside the index forever, which
+    // means it is never swept and the achiever is never paid.
+    if (stamped.kind === "plan") {
+      await indexGoal(goalId, stamped.at);
+    }
+    await appendJson(ledgerListKey(goalId), stamped);
+    return [...fresh.entries, stamped];
+  });
 }

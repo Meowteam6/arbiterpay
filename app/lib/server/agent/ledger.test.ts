@@ -17,6 +17,15 @@ async function loadLedger() {
   return import("@/lib/server/agent/ledger");
 }
 
+async function loadLedgerAndStore() {
+  vi.stubEnv("DATA_DIR", mkdtempSync(path.join(os.tmpdir(), "agent-ledger-")));
+  vi.resetModules();
+  return {
+    ledger: await import("@/lib/server/agent/ledger"),
+    store: await import("@/lib/server/store"),
+  };
+}
+
 const GOAL = "0x" + "ab".repeat(32);
 
 function plan(capUsd = "1.00") {
@@ -173,5 +182,124 @@ describe("agent ledger", () => {
       await appendLedger(`0x${String(i).repeat(64)}`, plan());
     }
     expect(await listLedgerGoalIds(2)).toHaveLength(2);
+  });
+});
+
+// Storage-level races. The ledger used to be read-append-write over one blob
+// per claim plus one global index blob, so concurrent writers dropped each
+// other's entries: a lost "record" strands a claim outside the settlement
+// sweep and a lost index member hides the claim from the feed entirely.
+describe("agent ledger under concurrency", () => {
+  it("keeps every concurrent append for one claim", async () => {
+    const { appendLedger, readLedger } = await loadLedger();
+    await appendLedger(GOAL, plan());
+
+    const total = 20;
+    await Promise.all(
+      Array.from({ length: total }, (_, i) =>
+        appendLedger(GOAL, {
+          kind: "record" as const,
+          goalId: GOAL,
+          registryStatus: "recorded" as const,
+          registryTx: `0xtx${i}`,
+        }),
+      ),
+    );
+
+    const records = (await readLedger(GOAL)).filter((e) => e.kind === "record");
+    expect(records).toHaveLength(total);
+    expect(new Set(records.map((e) => e.registryTx)).size).toBe(total);
+  });
+
+  it("indexes every claim when several land at once", async () => {
+    const { appendLedger, listLedgerGoalIds } = await loadLedger();
+    const goals = Array.from(
+      { length: 20 },
+      (_, i) => `0x${String(i).padStart(2, "0").repeat(32)}`,
+    );
+
+    await Promise.all(goals.map((goalId) => appendLedger(goalId, plan())));
+
+    const index = await listLedgerGoalIds(50);
+    expect(index).toHaveLength(goals.length);
+    expect(new Set(index.map((e) => e.goalId))).toEqual(
+      new Set(goals.map((g) => g.toLowerCase())),
+    );
+  });
+
+  it("holds the per-claim cap when spends race each other", async () => {
+    const { appendLedger, readLedger, totalSpentUsd } = await loadLedger();
+    await appendLedger(GOAL, plan("1.00"));
+
+    const settled = await Promise.allSettled(
+      Array.from({ length: 20 }, (_, i) =>
+        appendLedger(GOAL, spend("0.25", `job-${i}`)),
+      ),
+    );
+
+    // Four spends of 0.25 fit under the 1.00 cap; the rest must be refused.
+    expect(settled.filter((r) => r.status === "fulfilled")).toHaveLength(4);
+    expect(totalSpentUsd(await readLedger(GOAL))).toBe("1.00");
+  });
+
+  it("admits only one plan when two runs start together", async () => {
+    const { appendLedger, readLedger } = await loadLedger();
+
+    const settled = await Promise.allSettled(
+      Array.from({ length: 10 }, () => appendLedger(GOAL, plan())),
+    );
+
+    expect(settled.filter((r) => r.status === "fulfilled")).toHaveLength(1);
+    expect((await readLedger(GOAL)).filter((e) => e.kind === "plan")).toHaveLength(
+      1,
+    );
+  });
+});
+
+// Anything already written in the old shape has to keep working: a ledger the
+// agent cannot read is a claim it will re-plan and re-charge for.
+describe("agent ledger migration", () => {
+  it("reads a ledger written as a single blob", async () => {
+    const { ledger, store } = await loadLedgerAndStore();
+    await store.writeJson(`agent-ledger-${GOAL.toLowerCase()}.json`, [
+      { ...plan(), at: "2026-07-01T00:00:00.000Z" },
+      { ...spend("0.02"), at: "2026-07-01T00:00:01.000Z" },
+    ]);
+
+    const entries = await ledger.readLedger(GOAL);
+    expect(entries).toHaveLength(2);
+    expect(ledger.totalSpentUsd(entries)).toBe("0.02");
+  });
+
+  it("carries blob entries into the list on the next append", async () => {
+    const { ledger, store } = await loadLedgerAndStore();
+    await store.writeJson(`agent-ledger-${GOAL.toLowerCase()}.json`, [
+      { ...plan("1.00"), at: "2026-07-01T00:00:00.000Z" },
+      { ...spend("0.90"), at: "2026-07-01T00:00:01.000Z" },
+    ]);
+
+    // The old plan and spend still count, so this one breaks the cap.
+    await expect(
+      ledger.appendLedger(GOAL, spend("0.20", "job-2")),
+    ).rejects.toThrow(/cap/i);
+
+    const entries = await ledger.appendLedger(GOAL, spend("0.05", "job-3"));
+    expect(entries).toHaveLength(3);
+    expect(ledger.totalSpentUsd(entries)).toBe("0.95");
+    // A second plan is still refused: history was not lost in the move.
+    await expect(ledger.appendLedger(GOAL, plan())).rejects.toThrow(/plan/i);
+  });
+
+  it("keeps pre-migration index entries visible in the feed", async () => {
+    const { ledger, store } = await loadLedgerAndStore();
+    const legacyGoal = "0x" + "ef".repeat(32);
+    await store.writeJson("agent-ledger-index.json", [
+      { goalId: legacyGoal, at: "2026-07-01T00:00:00.000Z" },
+    ]);
+
+    await ledger.appendLedger(GOAL, plan());
+
+    const index = await ledger.listLedgerGoalIds(10);
+    expect(index.map((e) => e.goalId)).toEqual([GOAL.toLowerCase(), legacyGoal]);
   });
 });
