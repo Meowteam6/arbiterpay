@@ -1,9 +1,7 @@
 import { describe, it, expect, vi, beforeEach } from "vitest";
-import { promises as fs } from "fs";
-import path from "path";
+import { unmarkClaimed } from "@/lib/server/claims";
 import { runPrivatePayout } from "@/lib/server/unlink-payout";
 
-const DATA = path.join(process.cwd(), ".data");
 function fakeTreasury() {
   return {
     deposit: vi.fn(async () => ({ txId: "dep-1" })),
@@ -11,8 +9,10 @@ function fakeTreasury() {
   };
 }
 describe("runPrivatePayout", () => {
+  // Reset through the claims API rather than deleting a file: the claim flag
+  // is a store key now, not an entry in one shared blob.
   beforeEach(async () => {
-    await fs.rm(path.join(DATA, "claims.json"), { force: true });
+    await unmarkClaimed("goal-1");
   });
   it("deposits then transfers to the recipient and marks claimed", async () => {
     const treasury = fakeTreasury();
