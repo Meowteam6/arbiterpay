@@ -4,12 +4,20 @@
 // Browse-pools empty state is the first thing on screen, not a zero balance.
 // The streak card renders only when wearable data can exist, and the balance
 // card sits below the goal content because funding is secondary to progress.
+//
+// Two silences fixed here. The connect button used to swallow its failure into
+// console.error, so a provider outage read as a dead button; it now says what
+// went wrong, and when the provider is the problem it stops offering a connect
+// flow that cannot succeed. And a verified claim waiting on its pool period
+// used to look identical to one still being judged, with nothing on screen
+// saying when the money arrives - the chain already knows, so the card says it.
 
 import Link from "next/link";
+import { useState } from "react";
 import { useQuery } from "@tanstack/react-query";
 import BalanceCard from "@/components/BalanceCard";
 import Countdown from "@/components/Countdown";
-import { Badge, EmptyState, ErrorNote, Skeleton } from "@/components/ui";
+import { Badge, EmptyState, ErrorNote, Skeleton, TAP_TARGET } from "@/components/ui";
 import {
   displayGoalSpec,
   evidenceTypeOf,
@@ -19,65 +27,17 @@ import {
   type ParticipantInfo,
   type PoolInfo,
 } from "@/lib/contract";
+import {
+  fetchProviderState,
+  providerConnected,
+  providerDownReason,
+  providerQueryKey,
+} from "@/lib/wearable-provider";
 import { useEmbeddedWallet } from "@/lib/wallet";
 
 interface JoinedPool {
   pool: PoolInfo;
   participant: ParticipantInfo;
-}
-
-interface HealthProgress {
-  connected: boolean;
-  metric: string | null;
-  streakDays: number | null;
-  targetDays: number | null;
-  lastSync: string | null;
-}
-
-type HealthState =
-  | { kind: "ok"; progress: HealthProgress }
-  | { kind: "unavailable"; reason: string };
-
-function parseHealthProgress(payload: unknown): HealthProgress {
-  const record =
-    typeof payload === "object" && payload !== null
-      ? (payload as Record<string, unknown>)
-      : {};
-  return {
-    connected: record.connected === true,
-    metric: typeof record.metric === "string" ? record.metric : null,
-    streakDays:
-      typeof record.streakDays === "number" ? record.streakDays : null,
-    targetDays:
-      typeof record.targetDays === "number" ? record.targetDays : null,
-    lastSync: typeof record.lastSync === "string" ? record.lastSync : null,
-  };
-}
-
-async function fetchHealthProgress(
-  address: `0x${string}`,
-  pool?: PoolInfo,
-): Promise<HealthState> {
-  try {
-    const windowQuery = pool
-      ? `&start=${Number(pool.periodStart)}&end=${Number(pool.periodEnd)}`
-      : "";
-    const res = await fetch(
-      `/api/junction/progress?address=${address}${windowQuery}`,
-    );
-    if (!res.ok) {
-      return {
-        kind: "unavailable",
-        reason: `Health progress feed responded ${res.status}.`,
-      };
-    }
-    return { kind: "ok", progress: parseHealthProgress(await res.json()) };
-  } catch {
-    return {
-      kind: "unavailable",
-      reason: "Could not reach the health progress feed.",
-    };
-  }
 }
 
 /** Open Junction Link to connect a provider (WHOOP, Oura, Fitbit, Garmin…). */
@@ -111,6 +71,26 @@ function resultLabel(p: ParticipantInfo): { text: string; tone: "accent" | "mute
   return { text: "Goal missed", tone: "muted" };
 }
 
+/** A verified result on a pool that has not settled yet: the money is owed and
+ *  is waiting on the clock, nothing else. The chain alone says this - the
+ *  participant's verdict is recorded and the pool is unsettled - so no ledger
+ *  read is needed to tell someone when to come back. */
+function deferredUntil(entry: JoinedPool): bigint | null {
+  const { pool, participant } = entry;
+  if (pool.settled) return null;
+  if (!participant.resultRecorded || !participant.verdict) return null;
+  return pool.periodEnd;
+}
+
+function formatSettleMoment(periodEnd: bigint): string {
+  return new Date(Number(periodEnd) * 1000).toLocaleString(undefined, {
+    month: "short",
+    day: "numeric",
+    hour: "numeric",
+    minute: "2-digit",
+  });
+}
+
 function ConnectButton({
   address,
   label = "Connect health data",
@@ -120,22 +100,48 @@ function ConnectButton({
   label?: string;
   secondary?: boolean;
 }) {
+  // The failure used to go to console.error only, which made the button look
+  // dead to anyone whose connect flow could not start. It is a money-adjacent
+  // path (no wearable, no verification, no payout), so it reports.
+  const [error, setError] = useState<string | null>(null);
+  const [opening, setOpening] = useState(false);
+
   return (
-    <button
-      type="button"
-      onClick={() => {
-        void connectHealthData(address).catch((err) => {
-          console.error(err);
-        });
-      }}
-      className={
-        secondary
-          ? "mt-3 rounded-xl border border-edge px-4 py-2 text-sm font-semibold text-foreground hover:border-accent/50"
-          : "mt-3 rounded-xl bg-accent-strong px-4 py-2 text-sm font-semibold text-background hover:bg-accent"
-      }
-    >
-      {label}
-    </button>
+    <>
+      <button
+        type="button"
+        disabled={opening}
+        onClick={() => {
+          setError(null);
+          setOpening(true);
+          void connectHealthData(address)
+            .catch((err: unknown) => {
+              setError(
+                err instanceof Error
+                  ? err.message
+                  : "Could not open the connect flow.",
+              );
+            })
+            .finally(() => setOpening(false));
+        }}
+        className={`mt-3 rounded-xl font-semibold disabled:cursor-not-allowed disabled:opacity-60 ${TAP_TARGET} ${
+          secondary
+            ? "border border-edge text-foreground hover:border-accent/50"
+            : "bg-accent-strong text-background hover:bg-accent"
+        }`}
+      >
+        {opening ? "Opening the connect flow" : label}
+      </button>
+      {error !== null ? (
+        <div className="mt-3">
+          <ErrorNote
+            title="Could not start the connect flow"
+            detail={`${error} Nothing was connected and nothing was charged.`}
+            onRetry={() => setError(null)}
+          />
+        </div>
+      ) : null}
+    </>
   );
 }
 
@@ -147,10 +153,14 @@ function StreakCard({
   pool?: PoolInfo;
 }) {
   const healthQuery = useQuery({
-    queryKey: ["junction-progress", address, pool?.id.toString() ?? "none"],
-    queryFn: () => fetchHealthProgress(address, pool),
+    queryKey: providerQueryKey(address, pool?.id),
+    queryFn: () => fetchProviderState(address, pool),
     retry: false,
   });
+
+  const state = healthQuery.data;
+  const downReason = providerDownReason(state);
+  const progress = state?.kind === "ok" ? state.progress : null;
 
   return (
     <section className="rounded-2xl border border-edge bg-surface p-5">
@@ -160,19 +170,23 @@ function StreakCard({
           <Skeleton className="h-8 w-40" />
           <Skeleton className="h-4 w-64" />
         </div>
-      ) : healthQuery.data === undefined ||
-        healthQuery.data.kind === "unavailable" ? (
+      ) : downReason !== null ? (
+        // No connect button here on purpose: while the provider is refusing
+        // us, the connect call fails too, so offering it is a loop with no
+        // exit. Document-verified pools still work, so point at those.
         <>
-          <p className="mt-3 rounded-xl border border-dashed border-edge p-4 text-sm text-muted">
-            {healthQuery.data?.kind === "unavailable"
-              ? healthQuery.data.reason
-              : "Streak feed unavailable."}{" "}
-            Connect a wearable (WHOOP, Oura, Fitbit, Garmin…) to see verified
-            streak progress here.
+          <p className="mt-3 rounded-xl border border-warning/40 bg-warning/10 p-4 text-sm text-foreground/80">
+            {downReason} Connecting a device would not change it, so there is
+            nothing for you to do here right now.
           </p>
-          <ConnectButton address={address} />
+          <Link
+            href="/pools"
+            className={`mt-3 rounded-xl border border-edge font-semibold text-foreground hover:border-accent/50 ${TAP_TARGET}`}
+          >
+            Find a goal you can still prove
+          </Link>
         </>
-      ) : !healthQuery.data.progress.connected ? (
+      ) : !providerConnected(state) ? (
         <>
           <p className="mt-3 rounded-xl border border-dashed border-edge p-4 text-sm text-muted">
             No wearable connected yet. Link a provider (WHOOP, Oura, Fitbit,
@@ -183,17 +197,17 @@ function StreakCard({
       ) : (
         <div className="mt-3">
           <p className="text-3xl font-bold text-accent">
-            {healthQuery.data.progress.streakDays ?? 0}
+            {progress?.streakDays ?? 0}
             <span className="text-lg font-semibold text-foreground">
-              {healthQuery.data.progress.targetDays !== null
-                ? ` of ${healthQuery.data.progress.targetDays} days`
+              {progress?.targetDays !== null && progress?.targetDays !== undefined
+                ? ` of ${progress.targetDays} days`
                 : " days"}
             </span>
           </p>
           <p className="mt-1 text-sm text-muted">
-            {healthQuery.data.progress.metric ?? "Verified streak"}
-            {healthQuery.data.progress.lastSync !== null
-              ? ` · last sync ${healthQuery.data.progress.lastSync}`
+            {progress?.metric ?? "Verified streak"}
+            {progress?.lastSync !== null && progress?.lastSync !== undefined
+              ? ` · last sync ${progress.lastSync}`
               : ""}
           </p>
           <ConnectButton
@@ -303,10 +317,10 @@ export default function DashboardContent() {
   // matches StreakCard's no-pool query exactly so the cache serves both
   // instead of fetching the same endpoint twice per dashboard load.
   const connectionQuery = useQuery({
-    queryKey: ["junction-progress", address, "none"],
+    queryKey: providerQueryKey(address),
     queryFn: () => {
       if (address === null) throw new Error("No wallet address.");
-      return fetchHealthProgress(address);
+      return fetchProviderState(address);
     },
     enabled: address !== null,
     retry: false,
@@ -339,9 +353,7 @@ export default function DashboardContent() {
     );
   }
 
-  const wearableConnected =
-    connectionQuery.data?.kind === "ok" &&
-    connectionQuery.data.progress.connected;
+  const wearableConnected = providerConnected(connectionQuery.data);
   const wearablePool = (joinedQuery.data ?? []).find(
     ({ pool }) => evidenceTypeOf(pool.goalSpec) === "wearable",
   )?.pool;
@@ -381,8 +393,10 @@ export default function DashboardContent() {
             }
           />
         ) : (
-          (joinedQuery.data ?? []).map(({ pool, participant }) => {
+          (joinedQuery.data ?? []).map((entry) => {
+            const { pool, participant } = entry;
             const result = resultLabel(participant);
+            const settlesAt = deferredUntil(entry);
             return (
               <Link
                 key={pool.id.toString()}
@@ -414,6 +428,14 @@ export default function DashboardContent() {
                     periodEnd={pool.periodEnd}
                   />
                 </div>
+                {settlesAt !== null ? (
+                  <p className="mt-3 rounded-xl border border-dashed border-accent/30 bg-accent-deep/20 p-3 text-sm text-accent">
+                    Verified and recorded on-chain. SPOTTER settles this when
+                    the pool period ends at {formatSettleMoment(settlesAt)} (
+                    <Countdown periodStart={0n} periodEnd={settlesAt} />
+                    ) - no human involved, nothing for you to do.
+                  </p>
+                ) : null}
               </Link>
             );
           })

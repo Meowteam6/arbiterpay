@@ -9,12 +9,25 @@ import BackGoal from "@/components/BackGoal";
 import FundPool from "@/components/FundPool";
 import EvidenceUpload from "@/components/EvidenceUpload";
 import WearableCheck from "@/components/WearableCheck";
-import { Badge, ErrorNote, Skeleton, Stat } from "@/components/ui";
+import { Badge, ErrorNote, Skeleton, Stat, TAP_TARGET } from "@/components/ui";
 import { arcAddressUrl } from "@/lib/chains";
+import {
+  AGENT_WALLET_QUERY_KEY,
+  agentIsBroke,
+  fetchAgentWallet,
+} from "@/lib/agent-budget";
+import type { LedgerEntry } from "@/lib/agent-receipt";
+import { claimProofPathOf, type ProofPath } from "@/lib/claim-restore";
+import {
+  fetchProviderState,
+  providerDownReason,
+  providerQueryKey,
+} from "@/lib/wearable-provider";
 import {
   BOUNTY_MODEL_LABELS,
   displayGoalSpec,
   evidenceTypeOf,
+  fetchGoalId,
   fetchParticipant,
   fetchParticipants,
   fetchPool,
@@ -31,15 +44,32 @@ function formatDay(seconds: bigint): string {
   });
 }
 
+/** Every terminal state on this page ends with somewhere to go. A pool that
+ *  has settled or expired is not a place to leave someone standing. */
+function BrowsePoolsLink({ label = "Browse live pools" }: { label?: string }) {
+  return (
+    <Link
+      href="/pools"
+      className={`mt-4 rounded-xl bg-accent-strong font-semibold text-background hover:bg-accent ${TAP_TARGET}`}
+    >
+      {label}
+    </Link>
+  );
+}
+
 export default function PoolDetail({ id }: { id: string }) {
   const { address } = useEmbeddedWallet();
   // Wearable pools offer two proof paths, but only one may be mounted at a
   // time: WearableCheck and EvidenceUpload both drive SPOTTER's run loop for
   // the same goal id, and two concurrent pollers with conflicting evidence
   // kinds is an untested surface on a money path.
-  const [proofPath, setProofPath] = useState<"wearable" | "document">(
-    "wearable",
-  );
+  //
+  // The visitor's own choice wins; below it, whichever path an existing claim
+  // used (so a returning user is not stranded behind the other tab); below
+  // that, the wearable default. Derived rather than stored so the restore can
+  // never race the render or overwrite a tap.
+  const [pinnedPath, setPinnedPath] = useState<ProofPath | null>(null);
+  const choosePath = (path: ProofPath) => setPinnedPath(path);
   const poolId = useMemo(() => {
     try {
       const parsed = BigInt(id);
@@ -85,6 +115,58 @@ export default function PoolDetail({ id }: { id: string }) {
     },
     enabled: poolId !== null && address !== null,
   });
+
+  // Wearable goals depend on an outside provider that can refuse us outright.
+  // Shares one query key with the dashboard and the pool list.
+  const providerQuery = useQuery({
+    queryKey: providerQueryKey(address),
+    queryFn: () => {
+      if (address === null) throw new Error("No wallet connected.");
+      return fetchProviderState(address);
+    },
+    enabled: address !== null,
+    retry: false,
+  });
+
+  // SPOTTER pays for verification from its own wallet. When that wallet is
+  // empty, a claim started here dies at the buy step, so say so before the
+  // person taps rather than after.
+  const agentWalletQuery = useQuery({
+    queryKey: AGENT_WALLET_QUERY_KEY,
+    queryFn: fetchAgentWallet,
+    staleTime: 15_000,
+  });
+
+  const isWearableGoal =
+    poolQuery.data !== undefined &&
+    evidenceTypeOf(poolQuery.data.pool.goalSpec) === "wearable";
+  const joined = participantQuery.data?.joined === true;
+
+  // Which tab owns an existing claim. Only wearable pools have two tabs, so
+  // this is the only case where the answer can be wrong; the ledger is read
+  // once and the claim section waits for it rather than mounting the wrong
+  // path first and swapping it out from under a running restore.
+  const claimPathQuery = useQuery({
+    queryKey: ["claim-proof-path", id, address],
+    queryFn: async (): Promise<ProofPath | null> => {
+      if (poolId === null || address === null) {
+        throw new Error("No claim identity yet.");
+      }
+      const goalId = await fetchGoalId(poolId, address);
+      const res = await fetch(`/api/agent/run/${goalId}`);
+      if (!res.ok) throw new Error(`ledger read responded ${res.status}`);
+      const body = (await res.json().catch(() => ({}))) as {
+        ledger?: LedgerEntry[];
+      };
+      return claimProofPathOf(Array.isArray(body.ledger) ? body.ledger : []);
+    },
+    enabled: poolId !== null && address !== null && joined && isWearableGoal,
+    retry: false,
+    staleTime: 60_000,
+  });
+
+  const proofPath: ProofPath =
+    pinnedPath ?? claimPathQuery.data ?? "wearable";
 
   if (poolId === null) {
     return (
@@ -137,16 +219,45 @@ export default function PoolDetail({ id }: { id: string }) {
   // receipt stay visible for joined participants until settlement runs.
   const phase = poolPhase(pool, asOfSeconds);
 
+  // A wearable goal with the provider refusing us cannot be checked at all.
+  // The entry fee is real money paid up front, so the join action comes off
+  // the page rather than selling a goal SPOTTER has no way to verify.
+  const providerDown = providerDownReason(providerQuery.data);
+  const unverifiableNow = providerDown !== null && evidenceType === "wearable";
+  const agentBroke = agentIsBroke(agentWalletQuery.data?.balanceUsd ?? null);
+  // Wait for the restore before mounting either tab; mounting the wrong one
+  // first would start a poll loop the correct tab then has to supersede.
+  const claimPathPending = isWearableGoal && hasJoined && claimPathQuery.isLoading;
+
   // The single mounted claim surface. Wearable pools default to the wearable
   // check with the document upload one tap away; document pools upload only.
   const claimSection = !hasJoined ? null : (
     <>
+      {agentBroke ? (
+        <div className="rounded-xl border border-warning/40 bg-warning/10 p-4">
+          <p className="text-base font-semibold text-warning">
+            SPOTTER is out of budget
+          </p>
+          <p className="mt-1 text-sm text-foreground/80">
+            The agent buys every verification from its own wallet, and that
+            wallet reads 0.00 USDC. A check started now stops at the buy step
+            and nobody gets paid. Nothing you did - come back once it is topped
+            up.
+          </p>
+          <Link
+            href="/agent"
+            className={`mt-3 rounded-xl border border-warning/50 text-warning hover:bg-warning/10 ${TAP_TARGET}`}
+          >
+            See SPOTTER&apos;s wallet
+          </Link>
+        </div>
+      ) : null}
       {evidenceType === "wearable" ? (
         <div className="flex flex-wrap gap-2">
           <button
             type="button"
-            onClick={() => setProofPath("wearable")}
-            className={`rounded-xl border px-4 py-2 text-sm font-medium ${
+            onClick={() => choosePath("wearable")}
+            className={`rounded-xl border ${TAP_TARGET} ${
               proofPath === "wearable"
                 ? "border-accent/50 bg-accent-deep text-accent"
                 : "border-edge bg-surface-raised text-muted hover:text-foreground"
@@ -156,8 +267,8 @@ export default function PoolDetail({ id }: { id: string }) {
           </button>
           <button
             type="button"
-            onClick={() => setProofPath("document")}
-            className={`rounded-xl border px-4 py-2 text-sm font-medium ${
+            onClick={() => choosePath("document")}
+            className={`rounded-xl border ${TAP_TARGET} ${
               proofPath === "document"
                 ? "border-accent/50 bg-accent-deep text-accent"
                 : "border-edge bg-surface-raised text-muted hover:text-foreground"
@@ -168,8 +279,17 @@ export default function PoolDetail({ id }: { id: string }) {
         </div>
       ) : null}
       <section className="rounded-2xl border border-accent/40 bg-surface p-5">
-        {evidenceType === "wearable" && proofPath === "wearable" ? (
-          <WearableCheck poolId={pool.id} goalSpec={pool.goalSpec} />
+        {claimPathPending ? (
+          <div className="space-y-3">
+            <Skeleton className="h-6 w-40" />
+            <Skeleton className="h-16" />
+          </div>
+        ) : evidenceType === "wearable" && proofPath === "wearable" ? (
+          <WearableCheck
+            poolId={pool.id}
+            goalSpec={pool.goalSpec}
+            onSwitchToDocument={() => choosePath("document")}
+          />
         ) : (
           <EvidenceUpload poolId={pool.id} goalSpec={pool.goalSpec} />
         )}
@@ -180,9 +300,11 @@ export default function PoolDetail({ id }: { id: string }) {
   return (
     <div className="space-y-8">
       <div>
+        {/* -ml-4 keeps the text optically flush with the heading below while
+            the padding gives the link a real 44px thumb target. */}
         <Link
           href="/pools"
-          className="text-sm text-muted hover:text-foreground"
+          className={`-ml-4 text-muted hover:text-foreground ${TAP_TARGET}`}
         >
           Back to pools
         </Link>
@@ -198,6 +320,9 @@ export default function PoolDetail({ id }: { id: string }) {
           ) : (
             <Badge tone="accent">Live</Badge>
           )}
+          {unverifiableNow && phase === "live" ? (
+            <Badge tone="warning">Cannot verify right now</Badge>
+          ) : null}
         </div>
         {isDocGoal ? (
           <p className="mt-3 text-sm font-semibold uppercase tracking-wide text-accent">
@@ -254,24 +379,39 @@ export default function PoolDetail({ id }: { id: string }) {
           <p className="text-xs font-semibold uppercase tracking-wide text-muted">
             Participant actions
           </p>
-          <section className="rounded-2xl border border-edge bg-surface p-5">
-            <h2 className="text-lg font-semibold">Join this pool</h2>
-            <p className="mb-4 mt-1 text-sm text-muted">
-              {isDocGoal
-                ? `Pay the ${formatUsdc(pool.entryFee)} USDC entry fee, then upload your record. The bounty pays out the moment your document is verified.`
-                : `Pay the ${formatUsdc(pool.entryFee)} USDC entry fee, hit the goal during the period, and the bounty pays out the moment your result is verified.`}
-            </p>
-            {participantCount === 0 ? (
-              <p className="mb-4 rounded-xl border border-dashed border-accent/30 bg-accent-deep/20 p-3 text-sm text-accent">
-                No one has joined yet, be the first.
+          {unverifiableNow && !hasJoined ? (
+            <section className="rounded-2xl border border-warning/40 bg-warning/10 p-5">
+              <h2 className="text-lg font-semibold text-warning">
+                This goal cannot be verified right now
+              </h2>
+              <p className="mt-1 text-sm text-foreground/80">{providerDown}</p>
+              <p className="mt-2 text-sm text-foreground/80">
+                The {formatUsdc(pool.entryFee)} USDC entry fee is real money and
+                joining will not be offered while SPOTTER has no way to check
+                the goal. Document-verified pools are unaffected.
               </p>
-            ) : null}
-            <JoinPool
-              poolId={pool.id}
-              entryFee={pool.entryFee}
-              alreadyJoined={hasJoined}
-            />
-          </section>
+              <BrowsePoolsLink label="Find a pool that can pay" />
+            </section>
+          ) : (
+            <section className="rounded-2xl border border-edge bg-surface p-5">
+              <h2 className="text-lg font-semibold">Join this pool</h2>
+              <p className="mb-4 mt-1 text-sm text-muted">
+                {isDocGoal
+                  ? `Pay the ${formatUsdc(pool.entryFee)} USDC entry fee, then upload your record. The bounty pays out the moment your document is verified.`
+                  : `Pay the ${formatUsdc(pool.entryFee)} USDC entry fee, hit the goal during the period, and the bounty pays out the moment your result is verified.`}
+              </p>
+              {participantCount === 0 ? (
+                <p className="mb-4 rounded-xl border border-dashed border-accent/30 bg-accent-deep/20 p-3 text-sm text-accent">
+                  No one has joined yet, be the first.
+                </p>
+              ) : null}
+              <JoinPool
+                poolId={pool.id}
+                entryFee={pool.entryFee}
+                alreadyJoined={hasJoined}
+              />
+            </section>
+          )}
 
           {claimSection}
 
@@ -288,6 +428,16 @@ export default function PoolDetail({ id }: { id: string }) {
               and backing are closed. SPOTTER settles the payouts for verified
               achievers now that the period is over.
             </p>
+            {!hasJoined ? (
+              <>
+                <p className="mt-2 text-sm text-muted">
+                  {participantCount === 0
+                    ? "Nobody joined this one, so there is nothing here to settle."
+                    : "You are not in this pool, so nothing here settles for you."}
+                </p>
+                <BrowsePoolsLink />
+              </>
+            ) : null}
           </section>
 
           {hasJoined ? (
@@ -303,9 +453,10 @@ export default function PoolDetail({ id }: { id: string }) {
         <section className="rounded-2xl border border-edge bg-surface p-5">
           <h2 className="text-lg font-semibold">This pool has settled</h2>
           <p className="mt-1 text-sm text-muted">
-            Bounties were paid to verified achievers. Browse other pools to
-            join a live one.
+            Bounties were paid to verified achievers. Nothing more happens on
+            this pool - the next payout is on a pool that is still open.
           </p>
+          <BrowsePoolsLink />
         </section>
       )}
 
