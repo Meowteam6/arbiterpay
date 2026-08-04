@@ -10,19 +10,20 @@
 // — that is the CRE / onReport path (Tier 2). canSettle ignores the digest; it
 // gates only on verified + confidence. No raw health data is hashed or stored.
 
-import {
-  createPublicClient,
-  createWalletClient,
-  defineChain,
-  http,
-  keccak256,
-  stringToBytes,
-  type Address,
-  type Hex,
-} from "viem";
+import { keccak256, stringToBytes, type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
+import {
+  arcPublicClient,
+  arcWalletClient,
+  ttlCache,
+} from "@/lib/server/arc-client";
 import { optionalEnv, requireEnv } from "@/lib/server/env";
 import type { Confidence } from "@/lib/server/judge";
+import {
+  isRetryableExternalError,
+  withRetry,
+  DEFAULT_BACKOFF_MS,
+} from "@/lib/server/retry";
 
 const HEALTH_VERDICT_ABI = [
   {
@@ -62,15 +63,10 @@ export const VERDICT_FACETS = {
 
 const CONFIDENCE_U8: Record<Confidence, number> = { low: 0, medium: 1, high: 2 };
 
-function arcTestnet() {
-  const rpcUrl = optionalEnv("ARC_RPC_URL", "https://rpc.testnet.arc.network");
-  return defineChain({
-    id: 5042002,
-    name: "Arc Testnet",
-    nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
-    rpcUrls: { default: { http: [rpcUrl] } },
-  });
-}
+/** Attempts for a chain call before giving up and surfacing the failure. */
+const RECORD_ATTEMPTS = 3;
+/** Backoff before attempts 2 and 3. Keeps the polling endpoint responsive. */
+const RETRY_BACKOFF_MS = DEFAULT_BACKOFF_MS;
 
 function oracleAccount() {
   const pk = requireEnv("ORACLE_SIGNER_PRIVATE_KEY");
@@ -91,6 +87,17 @@ const HEALTH_POOLS_GOALID_ABI = [
 ] as const;
 
 /**
+ * goalId is fixed the moment a pool is created (it hashes the pool address,
+ * pool id, participant and periodStart, none of which can change afterwards),
+ * yet POST /api/agent/run re-reads it on every ~800ms poll. Caching it removes
+ * one RPC read per poll per user without any staleness risk; the TTL exists
+ * only to bound a redeploy that repoints HEALTH_POOLS_ADDRESS, which is also
+ * why the contract address is part of the key.
+ */
+const GOAL_ID_TTL_MS = 5 * 60_000;
+const goalIdCache = ttlCache<Hex>({ ttlMs: GOAL_ID_TTL_MS, maxEntries: 512 });
+
+/**
  * Ask HealthPools for the goal id instead of re-deriving it here.
  *
  * The id is keccak256(abi.encode(pools, poolId, participant, periodStart)). It
@@ -99,22 +106,39 @@ const HEALTH_POOLS_GOALID_ABI = [
  * shared registry. Reading it from the contract keeps exactly ONE source of
  * truth for the formula: if it ever changes again, the registry write and the
  * settlement gate cannot silently desync.
+ *
+ * The read is retried: this is the first chain call of every agent run, so a
+ * single rate-limited RPC response here used to surface as an HTTP 500 before
+ * the run had done anything at all.
  */
 export async function computeGoalId(
   poolId: bigint,
   user: Address,
 ): Promise<Hex> {
   const pools = requireEnv("HEALTH_POOLS_ADDRESS") as Address;
-  const publicClient = createPublicClient({
-    chain: arcTestnet(),
-    transport: http(),
-  });
-  return publicClient.readContract({
-    address: pools,
-    abi: HEALTH_POOLS_GOALID_ABI,
-    functionName: "computeGoalId",
-    args: [poolId, user],
-  });
+  const key = `${pools.toLowerCase()}:${poolId.toString()}:${user.toLowerCase()}`;
+  return goalIdCache.get(key, () =>
+    withRetry(
+      () =>
+        arcPublicClient().readContract({
+          address: pools,
+          abi: HEALTH_POOLS_GOALID_ABI,
+          functionName: "computeGoalId",
+          args: [poolId, user],
+        }),
+      {
+        attempts: RECORD_ATTEMPTS,
+        backoffMs: RETRY_BACKOFF_MS,
+        isRetryable: isRetryableExternalError,
+        onRetry: (err, attempt, attempts) =>
+          console.warn(
+            `[verdict] computeGoalId attempt ${attempt}/${attempts} failed for pool ${poolId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          ),
+      },
+    ),
+  );
 }
 
 export type RecordVerdictOutcome =
@@ -122,12 +146,8 @@ export type RecordVerdictOutcome =
   | { status: "already-recorded"; goalId: Hex }
   | { status: "skipped"; reason: string };
 
-/** Attempts for the registry write before giving up and surfacing the failure. */
-const RECORD_ATTEMPTS = 3;
-/** Backoff before attempts 2 and 3. Keeps the polling endpoint responsive. */
-const RETRY_BACKOFF_MS = [400, 1200];
-
-const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+/** Marks a simulate/write failure that means the goal is already on chain. */
+const ALREADY_RECORDED_RE = /ALREADY_RECORDED/;
 
 /**
  * Write the verdict into the HealthVerdict registry (the canSettle gate).
@@ -167,49 +187,58 @@ export async function recordVerdict(
   // so a transient read failure self-heals on the next poll.
   const goalId = await computeGoalId(poolId, user);
   const digest = keccak256(stringToBytes(attesterId)); // advisory content hash
-  const chain = arcTestnet();
   const account = oracleAccount();
-  const wallet = createWalletClient({ account, chain, transport: http() });
-  const publicClient = createPublicClient({ chain, transport: http() });
+  const wallet = arcWalletClient(account);
+  const publicClient = arcPublicClient();
 
-  let lastError: Error | null = null;
-
-  for (let attempt = 1; attempt <= RECORD_ATTEMPTS; attempt++) {
-    if (attempt > 1) {
-      await sleep(RETRY_BACKOFF_MS[attempt - 2] ?? 1200);
+  try {
+    // Retrying this write is safe despite it being a write: it simulates first
+    // and the registry reverts ALREADY_RECORDED on a second write for the same
+    // goalId, so a repeat cannot double-record. Anything ALREADY_RECORDED is
+    // the end state we wanted, so it is non-retryable and handled below.
+    const txHash = await withRetry(
+      async () => {
+        const { request } = await publicClient.simulateContract({
+          account,
+          address: registry as Address,
+          abi: HEALTH_VERDICT_ABI,
+          functionName: "recordVerdict",
+          args: [goalId, verified, CONFIDENCE_U8[confidence], digest, facets],
+        });
+        const hash = await wallet.writeContract(request);
+        const receipt = await publicClient.waitForTransactionReceipt({
+          hash,
+        });
+        if (receipt.status !== "success") {
+          throw new Error(`recordVerdict tx ${hash} reverted`);
+        }
+        return hash;
+      },
+      {
+        attempts: RECORD_ATTEMPTS,
+        backoffMs: RETRY_BACKOFF_MS,
+        isRetryable: (err) =>
+          !ALREADY_RECORDED_RE.test(
+            err instanceof Error ? err.message : String(err),
+          ),
+        onRetry: (err, attempt, attempts) =>
+          console.warn(
+            `[verdict] recordVerdict attempt ${attempt}/${attempts} failed for goal ${goalId}: ${
+              err instanceof Error ? err.message : String(err)
+            }`,
+          ),
+      },
+    );
+    return { status: "recorded", txHash, goalId };
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err);
+    // Already on chain — the end state we wanted, so success, not failure.
+    if (ALREADY_RECORDED_RE.test(msg)) {
+      return { status: "already-recorded", goalId };
     }
-
-    try {
-      const { request } = await publicClient.simulateContract({
-        account,
-        address: registry as Address,
-        abi: HEALTH_VERDICT_ABI,
-        functionName: "recordVerdict",
-        args: [goalId, verified, CONFIDENCE_U8[confidence], digest, facets],
-      });
-      const txHash = await wallet.writeContract(request);
-      const receipt = await publicClient.waitForTransactionReceipt({
-        hash: txHash,
-      });
-      if (receipt.status !== "success") {
-        throw new Error(`recordVerdict tx ${txHash} reverted`);
-      }
-      return { status: "recorded", txHash, goalId };
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      // Already on chain — the end state we wanted. Stop, do not retry.
-      if (/ALREADY_RECORDED/.test(msg)) {
-        return { status: "already-recorded", goalId };
-      }
-      lastError = err instanceof Error ? err : new Error(msg);
-      console.warn(
-        `[verdict] recordVerdict attempt ${attempt}/${RECORD_ATTEMPTS} failed for goal ${goalId}: ${msg}`,
-      );
-    }
+    throw new Error(
+      `recordVerdict failed after ${RECORD_ATTEMPTS} attempts for goal ${goalId} ` +
+        `(pool ${poolId}, user ${user}): ${msg}`,
+    );
   }
-
-  throw new Error(
-    `recordVerdict failed after ${RECORD_ATTEMPTS} attempts for goal ${goalId} ` +
-      `(pool ${poolId}, user ${user}): ${lastError?.message ?? "unknown error"}`,
-  );
 }

@@ -1,24 +1,20 @@
 // Oracle signer for HealthPools on Arc testnet (server only).
 //
 // Arc testnet config (from docs.arc.io, captured in the build plan):
-//   chain id 5042002, rpc https://rpc.testnet.arc.network,
-//   native gas token is USDC (18 decimals as gas).
+//   chain id 5042002, native gas token is USDC (18 decimals as gas). The RPC
+//   endpoints and the shared fallback client live in lib/server/arc-client.ts;
+//   this module builds no client of its own, because a per-call client against
+//   a single endpoint is what made a rate-limited RPC look like a broken app.
 //
 // The recordResult ABI below matches the design-freeze interface in the
 // build plan: recordResult(poolId, user, verdict, multiplierBps), oracle
 // signer only. If the contract agent changes parameter types this snippet
 // must be updated to match the deployed ABI.
 
-import {
-  createWalletClient,
-  createPublicClient,
-  defineChain,
-  http,
-  type Hex,
-  type Address,
-} from "viem";
+import { type Hex, type Address } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { optionalEnv, requireEnv } from "@/lib/server/env";
+import { arcPublicClient, arcWalletClient } from "@/lib/server/arc-client";
+import { requireEnv } from "@/lib/server/env";
 
 const HEALTH_POOLS_ABI = [
   {
@@ -41,19 +37,6 @@ export const BASE_MULTIPLIER_BPS = 10_000n;
 export const COMEBACK_BONUS_BPS = 2_500n;
 export const MULTIPLIER_CAP_BPS = 30_000n;
 export const COMEBACK_THRESHOLD = 60;
-
-function arcTestnet() {
-  const rpcUrl = optionalEnv("ARC_RPC_URL", "https://rpc.testnet.arc.network");
-  return defineChain({
-    id: 5042002,
-    name: "Arc Testnet",
-    nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
-    rpcUrls: { default: { http: [rpcUrl] } },
-    blockExplorers: {
-      default: { name: "Arcscan", url: "https://testnet.arcscan.app" },
-    },
-  });
-}
 
 function oracleAccount() {
   const pk = requireEnv("ORACLE_SIGNER_PRIVATE_KEY");
@@ -86,11 +69,9 @@ export async function recordResult(
   multiplierBps: bigint,
 ): Promise<Hex> {
   const contract = requireEnv("HEALTH_POOLS_ADDRESS") as Address;
-  const chain = arcTestnet();
   const account = oracleAccount();
-
-  const wallet = createWalletClient({ account, chain, transport: http() });
-  const publicClient = createPublicClient({ chain, transport: http() });
+  const wallet = arcWalletClient(account);
+  const publicClient = arcPublicClient();
 
   // simulate first so revert reasons surface as readable errors
   const { request } = await publicClient.simulateContract({

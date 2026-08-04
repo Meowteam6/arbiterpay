@@ -10,18 +10,16 @@
 //
 // Arc testnet: chain id 5042002, USDC ERC-20 at 0x3600..., 6 decimals. The
 // GoHealthMe balance unit (uUSDC) maps 1:1 to this token's base units.
+//
+// Chain access goes through the shared fallback client in
+// lib/server/arc-client.ts. This is a money path: a transfer that cannot reach
+// the one hard-coded endpoint is a user whose balance was already debited.
 
-import {
-  createPublicClient,
-  createWalletClient,
-  http,
-  type Address,
-  type Hex,
-} from "viem";
+import { type Address, type Hex } from "viem";
 import { privateKeyToAccount } from "viem/accounts";
-import { arcTestnet } from "@/lib/chains";
 import { USDC_ADDRESS } from "@/lib/contract";
-import { optionalEnv, requireEnv } from "@/lib/server/env";
+import { arcPublicClient, arcWalletClient } from "@/lib/server/arc-client";
+import { requireEnv } from "@/lib/server/env";
 
 const USDC_TRANSFER_ABI = [
   {
@@ -55,17 +53,9 @@ export async function sponsorUsdc(
     throw new Error("Sponsor amount must be greater than zero.");
   }
 
-  const rpcUrl = optionalEnv("ARC_RPC_URL", "https://rpc.testnet.arc.network");
   const account = treasuryAccount();
-  const wallet = createWalletClient({
-    account,
-    chain: arcTestnet,
-    transport: http(rpcUrl),
-  });
-  const publicClient = createPublicClient({
-    chain: arcTestnet,
-    transport: http(rpcUrl),
-  });
+  const wallet = arcWalletClient(account);
+  const publicClient = arcPublicClient();
 
   // simulate first so revert reasons surface as readable errors
   const { request } = await publicClient.simulateContract({
