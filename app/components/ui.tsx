@@ -1,6 +1,16 @@
 import type { ReactNode } from "react";
 import { arcTxUrl } from "@/lib/chains";
 
+/**
+ * The minimum a thumb can reliably hit: 44px tall with room either side. Small
+ * controls (a retry, a tab, a chip) kept drifting to ~33-37px because the
+ * padding alone decided the height, so the height is stated here and shared
+ * rather than re-derived per component. Sizing only - it carries no colour,
+ * border, or radius, so the visual language of each control is untouched.
+ */
+export const TAP_TARGET =
+  "inline-flex min-h-11 items-center justify-center px-4 py-2 text-sm font-medium";
+
 export function ArcTxLink({
   txHash,
   label = "View transaction on Arcscan",
@@ -64,7 +74,7 @@ export function ErrorNote({
         <button
           type="button"
           onClick={onRetry}
-          className="mt-3 rounded-lg border border-danger/50 px-3 py-1.5 text-sm font-medium text-danger hover:bg-danger/20"
+          className={`mt-3 rounded-lg border border-danger/50 text-danger hover:bg-danger/20 ${TAP_TARGET}`}
         >
           Retry
         </button>
