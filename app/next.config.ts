@@ -28,7 +28,13 @@ function loadRootEnv(): void {
 loadRootEnv();
 
 const nextConfig: NextConfig = {
-  /* config options here */
+  // The dev-tools indicator is for developers, not for footage: the e2e demo
+  // profile records the dev server, and the floating "N" badge would sit in
+  // the corner of every frame. Same cosmetic-only flag that hides the
+  // configuration banners (see lib/config.ts); normal dev keeps the default.
+  ...(process.env.NEXT_PUBLIC_DEMO_CHROME === "1"
+    ? { devIndicators: false as const }
+    : {}),
 };
 
 export default nextConfig;
