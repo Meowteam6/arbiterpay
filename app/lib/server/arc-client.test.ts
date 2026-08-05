@@ -74,10 +74,23 @@ afterEach(() => {
 });
 
 describe("arcRpcUrls", () => {
-  it("defaults to the three public Arc RPCs the browser client already uses", () => {
+  it("defaults to the public Arc RPCs the browser client already uses", () => {
     vi.stubEnv("ARC_RPC_URL", "");
     expect(arcRpcUrls()).toEqual([...arcTestnet.rpcUrls.default.http]);
-    expect(arcRpcUrls().length).toBe(3);
+    // More than one, so a single endpoint degrading cannot take reads down.
+    // The exact count is not the contract - which endpoints are healthy
+    // changes - so this asserts redundancy rather than a magic number.
+    expect(arcRpcUrls().length).toBeGreaterThan(1);
+  });
+
+  it("leads with an endpoint a browser can actually reach", () => {
+    vi.stubEnv("ARC_RPC_URL", "");
+    // viem's fallback tries these in order, so entry zero is what a browser
+    // talks to on a healthy request. rpc.testnet.arc.network serves no
+    // Access-Control-Allow-Origin and fails CORS preflight from the app's
+    // origin, which flooded every pool page's console; it may stay in the
+    // list as a server-side fallback but must never lead.
+    expect(arcRpcUrls()[0]).not.toContain("//rpc.testnet.arc.network");
   });
 
   it("serves ONLY an ARC_RPC_URL override when one is set", () => {
