@@ -34,3 +34,11 @@ cre/wf-goal-verification/.cre_build_tmp.js
 # local agent-ledger scratch used by e2e runs
 app/.data/
 app/.data-e2e/
+
+# playwright output (reports, traces, screenshots, demo recordings) and its
+# browser cache
+app/playwright-report/
+app/test-results/
+app/blob-report/
+app/.playwright/
+app/e2e-artifacts/
