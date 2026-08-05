@@ -48,6 +48,7 @@ Privacy invariant: raw health data never touches the chain — the Confidential 
 - `app/` — Next.js App Router: frontend and API routes (evidence, agent run, oracle signer)
 - `cre/` — Chainlink CRE goal-verification workflow (Confidential AI Attester callback pattern)
 - `scripts/` — `demo-reset.sh` (clean redeploy + seed) and `happy-path-test.sh` (live end-to-end proof)
+- `docs/PATH-A.md` — how the oracle-signed settlement path works end to end, plus a manual QA runbook
 
 See `HANDOFF.md` for run steps, on-chain addresses, env setup, and open items.
 
