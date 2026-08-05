@@ -20,10 +20,12 @@
 //   3. ONE module-scoped client. Rebuilding a client per call threw away
 //      viem's request dedupe and batching window every time.
 //
-// ARC_RPC_URL still wins when set (operator override, e.g. a private endpoint),
-// but it is now the FIRST entry of the fallback list rather than the only one:
-// an override that starts failing degrades to the public RPCs instead of taking
-// the whole app down with it.
+// ARC_RPC_URL, when set, is the ONLY endpoint. An operator who pins an RPC
+// means it: a private endpoint is pinned for policy reasons and a test endpoint
+// for hermeticity, and in both cases silently degrading to a public RPC defeats
+// the pin — a hermetic test run that "resiliently" fell through its mock once
+// broadcast settlement calldata at a live testnet. The fallback list above is
+// the no-override case.
 
 import {
   createPublicClient,
@@ -64,15 +66,16 @@ const RPC_RETRY_DELAY_MS = 150;
 const RPC_BATCH_WAIT_MS = 16;
 
 /**
- * The RPC list, override first. The public list is read from lib/chains.ts,
- * which is the same source lib/contract.ts builds the browser client from —
- * one list, no second copy to drift.
+ * The RPC list. With no override it is the three public RPCs from
+ * lib/chains.ts — the same source lib/contract.ts builds the browser client
+ * from, one list, no second copy to drift. When ARC_RPC_URL is set it is the
+ * whole list: falling through past a pinned endpoint would send traffic to
+ * exactly the endpoints the operator pinned away from.
  */
 export function arcRpcUrls(): string[] {
-  const publicUrls = [...arcTestnet.rpcUrls.default.http];
   const override = optionalEnv("ARC_RPC_URL", "");
-  if (override === "") return publicUrls;
-  return [override, ...publicUrls.filter((url) => url !== override)];
+  if (override === "") return [...arcTestnet.rpcUrls.default.http];
+  return [override];
 }
 
 let cachedKey = "";

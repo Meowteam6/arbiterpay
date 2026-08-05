@@ -1,4 +1,12 @@
 import { describe, it, expect, afterEach, vi } from "vitest";
+
+// Capture what getCircleClient hands the SDK. The rest of this file drives the
+// fake CircleClient below, so mocking the SDK module touches nothing else.
+const initiateClient = vi.hoisted(() => vi.fn().mockReturnValue({}));
+vi.mock("@circle-fin/developer-controlled-wallets", () => ({
+  initiateDeveloperControlledWalletsClient: initiateClient,
+}));
+
 import {
   getCircleClient,
   provisionSpotterWallet,
@@ -41,6 +49,26 @@ describe("getCircleClient", () => {
     vi.stubEnv("CIRCLE_API_KEY", "key");
     vi.stubEnv("CIRCLE_ENTITY_SECRET", "");
     expect(() => getCircleClient()).toThrow(/CIRCLE_ENTITY_SECRET/);
+  });
+
+  it("targets the production Circle API by default", () => {
+    vi.stubEnv("CIRCLE_API_KEY", "key");
+    vi.stubEnv("CIRCLE_ENTITY_SECRET", "shh");
+    vi.stubEnv("CIRCLE_API_BASE_URL", "");
+    getCircleClient();
+    expect(initiateClient).toHaveBeenLastCalledWith(
+      expect.objectContaining({ baseUrl: "https://api.circle.com" }),
+    );
+  });
+
+  it("honours CIRCLE_API_BASE_URL so a hermetic run can stub Circle out", () => {
+    vi.stubEnv("CIRCLE_API_KEY", "key");
+    vi.stubEnv("CIRCLE_ENTITY_SECRET", "shh");
+    vi.stubEnv("CIRCLE_API_BASE_URL", "http://127.0.0.1:3111/circle");
+    getCircleClient();
+    expect(initiateClient).toHaveBeenLastCalledWith(
+      expect.objectContaining({ baseUrl: "http://127.0.0.1:3111/circle" }),
+    );
   });
 });
 
