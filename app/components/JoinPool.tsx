@@ -249,11 +249,23 @@ export default function JoinPool({
   alreadyJoined?: boolean;
 }) {
   if (!DYNAMIC_CONFIGURED) {
+    // Fail closed, in plain language. A build without a wallet signer must
+    // refuse to join rather than render a button that cannot sign — and that
+    // refusal is a designed property of the build, not a runtime fault, so it
+    // wears the neutral dashed-note treatment instead of an error card.
     return (
-      <ErrorNote
-        title="Sign-in is not configured"
-        detail="Set NEXT_PUBLIC_DYNAMIC_ENVIRONMENT_ID to enable joining with an embedded wallet."
-      />
+      <div
+        role="note"
+        className="rounded-xl border border-dashed border-edge bg-surface/50 p-4"
+      >
+        <p className="text-base font-semibold">
+          Joining is unavailable in this build
+        </p>
+        <p className="mt-1 text-sm text-muted">
+          This demo ships without a wallet signer, so it declines to join
+          rather than fake a signature.
+        </p>
+      </div>
     );
   }
   return (

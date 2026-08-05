@@ -2,7 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { DYNAMIC_CONFIGURED } from "@/lib/config";
+import { DEMO_CHROME, DYNAMIC_CONFIGURED } from "@/lib/config";
 import { useEmbeddedWallet } from "@/lib/wallet";
 import AgentStrip from "@/components/AgentStrip";
 import { CopyAddressButton } from "@/components/FundingHelp";
@@ -156,7 +156,11 @@ export default function Header() {
         <div className="flex shrink-0 items-center gap-1 sm:gap-2">
           {DYNAMIC_CONFIGURED ? (
             <AuthControls />
-          ) : (
+          ) : DEMO_CHROME ? null : (
+            // Real unconfigured builds keep the honest pill; DEMO_CHROME is
+            // the cosmetic-only recording flag (lib/config.ts) and hiding
+            // operator chrome is exactly its charter. The join panel's
+            // fail-closed refusal is untouched either way.
             <span className="rounded-lg border border-edge px-3 py-2 text-xs text-muted">
               Sign-in unavailable
             </span>

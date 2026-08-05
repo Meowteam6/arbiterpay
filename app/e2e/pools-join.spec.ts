@@ -153,7 +153,7 @@ test.describe("pool detail", () => {
     // The honest failure: a build with no wallet integration says so inside
     // the join panel instead of rendering a button that cannot sign.
     await expect(
-      joinPanel.getByText("Sign-in is not configured"),
+      joinPanel.getByText("Joining is unavailable in this build"),
     ).toBeVisible();
     // The refusal is the proof this test exists for, and the panel sits below
     // the fold at the demo viewport — bring it into frame so the recording's
