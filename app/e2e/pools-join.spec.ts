@@ -61,7 +61,12 @@ test.describe("pool list", () => {
     const state = emptyState();
     state.pools = [
       pool({ id: "1", initiative: "Sleep Streak" }),
-      pool({ id: "2", initiative: "Flu Season", document: true }),
+      pool({
+        id: "2",
+        initiative: "Flu Season",
+        document: true,
+        goal: "Upload a flu shot record",
+      }),
     ];
     await mock.seed(state);
 
