@@ -222,17 +222,42 @@ export const erc20Abi = [
 // ------------------------------------------------------------------ clients
 
 let cachedClient: PublicClient | null = null;
+let cachedRpcOverride: string | null = null;
+
+/**
+ * The endpoints this client falls back across.
+ *
+ * The public list is the chain definition itself, so there is one copy of it
+ * for the browser, lib/server/arc-client.ts and lib/chains.ts to share.
+ *
+ * ARC_RPC_URL, when set, is the ONLY endpoint, matching the operator override
+ * lib/server/arc-client.ts and lib/server/pools.ts already honour — this
+ * module was the last Arc consumer that ignored it, which meant a server-side
+ * read through fetchPool() (loadClaimPool, and therefore both claim routes)
+ * could not be pointed at a private or local endpoint at all. The override
+ * replaces the public list rather than heading it: an operator who pins an
+ * endpoint means it, and quietly falling through a pinned endpoint sends
+ * traffic to exactly the endpoints the pin exists to avoid.
+ *
+ * The browser never sees the variable (it is not NEXT_PUBLIC), so this is a
+ * server-side override by construction.
+ */
+function arcRpcUrls(): string[] {
+  const override = process.env.ARC_RPC_URL ?? "";
+  if (override === "") return [...arcTestnet.rpcUrls.default.http];
+  return [override];
+}
 
 /** Shared Arc testnet public client with RPC fallbacks for flaky venue WiFi. */
 export function getArcPublicClient(): PublicClient {
-  if (cachedClient === null) {
+  const override = process.env.ARC_RPC_URL ?? "";
+  // Rebuild when the override changes rather than serving a client pinned to
+  // an endpoint the operator has since moved off.
+  if (cachedClient === null || cachedRpcOverride !== override) {
+    cachedRpcOverride = override;
     cachedClient = createPublicClient({
       chain: arcTestnet,
-      transport: fallback([
-        http("https://rpc.testnet.arc.network"),
-        http("https://rpc.blockdaemon.testnet.arc.network"),
-        http("https://rpc.drpc.testnet.arc.network"),
-      ]),
+      transport: fallback(arcRpcUrls().map((url) => http(url))),
     });
   }
   return cachedClient;

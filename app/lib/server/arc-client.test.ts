@@ -80,21 +80,19 @@ describe("arcRpcUrls", () => {
     expect(arcRpcUrls().length).toBe(3);
   });
 
-  it("puts an ARC_RPC_URL override first and keeps the public RPCs as fallbacks", () => {
+  it("serves ONLY an ARC_RPC_URL override when one is set", () => {
     vi.stubEnv("ARC_RPC_URL", "https://private.example/rpc");
-    const urls = arcRpcUrls();
-    expect(urls[0]).toBe("https://private.example/rpc");
-    // The override must not REPLACE the fallbacks - that is the single-endpoint
-    // failure mode this module exists to remove.
-    expect(urls.length).toBe(4);
+    // An operator who pins an endpoint means it: a private RPC is pinned for
+    // policy reasons and a test RPC for hermeticity, and in both cases quietly
+    // falling through to a public endpoint defeats the pin. The multi-URL
+    // resilience list is for the no-override case only.
+    expect(arcRpcUrls()).toEqual(["https://private.example/rpc"]);
   });
 
-  it("does not duplicate an override that is already a public RPC", () => {
+  it("treats a public RPC set as the override the same way", () => {
     const first = arcTestnet.rpcUrls.default.http[0];
     vi.stubEnv("ARC_RPC_URL", first);
-    const urls = arcRpcUrls();
-    expect(urls.length).toBe(3);
-    expect(new Set(urls).size).toBe(3);
+    expect(arcRpcUrls()).toEqual([first]);
   });
 });
 

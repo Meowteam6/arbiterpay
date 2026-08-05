@@ -12,6 +12,11 @@
     "lint": "eslint",
     "test": "vitest run",
     "test:watch": "vitest",
+    "test:e2e": "playwright test",
+    "test:e2e:ui": "playwright test --ui",
+    "test:e2e:demo": "playwright test --config playwright.demo.config.ts",
+    "test:explore": "playwright test --config e2e/explorer/explorer.config.ts",
+    "test:explore:env": "node -e \"const p = process.env.EXPLORER_ENV_FILE; if (p === undefined || p === '') { console.error('test:explore:env requires EXPLORER_ENV_FILE=<path to a sandbox dotenv file>'); process.exit(1); }\" && playwright test --config e2e/explorer/explorer.config.ts",
     "agent:provision": "node --env-file-if-exists=../.env --env-file-if-exists=.env.local --import tsx scripts/provision-spotter.ts"
   },
   "dependencies": {
@@ -34,6 +39,7 @@
     "wagmi": "^2.19.5"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@tailwindcss/postcss": "^4",
     "@types/node": "^20",
     "@types/react": "^19",

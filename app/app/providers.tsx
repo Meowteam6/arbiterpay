@@ -7,6 +7,7 @@ import { DynamicWagmiConnector } from "@dynamic-labs/wagmi-connector";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WagmiProvider, createConfig, fallback, http } from "wagmi";
 import { arcTestnet } from "@/lib/chains";
+import { DEMO_CHROME } from "@/lib/config";
 import { arcEvmNetwork } from "@/lib/dynamic";
 
 // Arc-only. Sepolia was removed with the dropped ENS work — its unreachable
@@ -50,9 +51,11 @@ export default function Providers({ children }: { children: ReactNode }) {
     // none of them mounts a Dynamic hook when it is false, so wagmi + react-query
     // are all the context the rest of the site needs. Returning only the banner
     // here used to blank the whole site and make every fallback dead code.
+    // DEMO_CHROME hides the banner (an operator's checklist item, not product)
+    // from recorded demo runs; every in-page fallback still renders.
     return (
       <>
-        <DynamicMissingBanner />
+        {DEMO_CHROME ? null : <DynamicMissingBanner />}
         <WagmiProvider config={wagmiConfig}>
           <QueryClientProvider client={queryClient}>
             {children}

@@ -9,7 +9,7 @@ import {
   initiateDeveloperControlledWalletsClient,
   type CircleDeveloperControlledWalletsClient,
 } from "@circle-fin/developer-controlled-wallets";
-import { requireEnv } from "@/lib/server/env";
+import { optionalEnv, requireEnv } from "@/lib/server/env";
 
 export const SPOTTER_BLOCKCHAIN = "ARC-TESTNET";
 export const SPOTTER_WALLET_SET_NAME = "SPOTTER";
@@ -44,10 +44,18 @@ export interface SpotterUsdcBalance {
   tokenId: string | null;
 }
 
+/**
+ * The one place a Circle SDK client is constructed.
+ *
+ * CIRCLE_API_BASE_URL exists so a test run can point every Circle call at a
+ * local stub instead of api.circle.com — the same seam ARC_RPC_URL provides
+ * for chain traffic. Production leaves it unset and gets Circle's real API.
+ */
 export function getCircleClient(): CircleClient {
   return initiateDeveloperControlledWalletsClient({
     apiKey: requireEnv("CIRCLE_API_KEY"),
     entitySecret: requireEnv("CIRCLE_ENTITY_SECRET"),
+    baseUrl: optionalEnv("CIRCLE_API_BASE_URL", "https://api.circle.com"),
   });
 }
 

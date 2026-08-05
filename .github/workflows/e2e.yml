@@ -1,0 +1,89 @@
+name: e2e
+
+# The Path A end-to-end suite. It needs no secrets and this workflow declares
+# none: every upstream (Arc RPC, Junction, the confidential attester) is the
+# local mock server Playwright starts alongside the app. If a change here ever
+# seems to need a repository secret, the suite has stopped being hermetic and
+# that is the bug to fix.
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+concurrency:
+  group: e2e-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  playwright:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      # A hermetic suite does not phone build metrics home either.
+      NEXT_TELEMETRY_DISABLED: "1"
+    defaults:
+      run:
+        working-directory: app
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          # One source of truth with local development.
+          node-version-file: .node-version
+          cache: npm
+          cache-dependency-path: app/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Resolve installed Playwright version
+        id: playwright
+        run: |
+          version=$(node -p "require('@playwright/test/package.json').version")
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Cache Playwright browsers
+        id: browser-cache
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ steps.playwright.outputs.version }}
+
+      - name: Install Chromium and its OS dependencies
+        if: steps.browser-cache.outputs.cache-hit != 'true'
+        run: npx playwright install --with-deps chromium
+
+      - name: Install OS dependencies only
+        if: steps.browser-cache.outputs.cache-hit == 'true'
+        run: npx playwright install-deps chromium
+
+      # The e2e suite must not be the only thing standing between a broken
+      # unit test and main, and both are cheap next to a browser run.
+      #
+      # `npm run lint` is deliberately NOT a step yet: the tree already fails
+      # it on two pre-existing errors (components/AgentConsole.tsx,
+      # components/Countdown.tsx) that are nothing to do with this suite. A
+      # continue-on-error lint step would look like coverage while enforcing
+      # nothing; add it as a real gate in the change that fixes those two.
+      - name: Typecheck
+        run: npx tsc --noEmit
+
+      - name: Unit tests
+        run: npm test
+
+      - name: End-to-end tests
+        run: npm run test:e2e
+
+      - name: Upload Playwright report
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          path: |
+            app/playwright-report/
+            app/test-results/
+          retention-days: 14
+          if-no-files-found: ignore
