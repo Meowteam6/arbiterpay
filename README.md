@@ -2,7 +2,11 @@
 
 Verified health goals with instant USDC rewards. Built at ETHGlobal New York 2026.
 
-Insurers already pay people for healthy behaviors — through opaque points systems and gift cards that arrive weeks later. GoHealthMe puts that model on-chain: sponsor-funded USDC pools pay out the instant a verified behavior happens, with the verification done by a confidential, decentralized oracle rather than a company, and the settlement run by an agent named SPOTTER from its own Circle wallet.
+**Live on Arc testnet: https://gohealthme-circle.vercel.app**
+
+Insurers already pay people for healthy behaviors — through opaque points systems and gift cards that arrive weeks later. GoHealthMe puts that model on-chain: sponsor-funded USDC pools pay out the instant a verified behavior happens, the verification runs inside a confidential enclave rather than at a company, and an agent named SPOTTER releases the money with no human in the loop.
+
+SPOTTER is an economic actor, not a script. It holds its own Circle wallet, buys the verification each claim needs, decides, and calls `settle()` itself — under a per-claim spending cap and a daily budget, with every cent it spends printed on screen. The bounty itself is the sponsor's, released from the pool by that call; what SPOTTER pays for is gas and the checks it buys.
 
 Partners: Arc (USDC settlement chain), Circle (agent wallet + service payments), Chainlink (CRE + Confidential AI Attester verification).
 
@@ -11,8 +15,8 @@ Partners: Arc (USDC settlement chain), Circle (agent wallet + service payments),
 1. Anyone funds an initiative pool (sleep, workouts, preventive care) with USDC and published bounties
 2. Participants join with their wallet — one wallet, one entry, enforced by the pool contract
 3. Health data is verified off-chain (wearables via Junction — WHOOP/Oura/Fitbit/Garmin — or a Chainlink Confidential AI Attester judging the goal inside a TEE); only the verdict ever touches the chain
-4. SPOTTER, the settlement agent, buys the verification it needs per claim, decides, and settles the pool from its own Circle wallet: achievers get paid (optionally to a private Unlink account derived from their own wallet signature, with no on-chain link to the goal), forfeits roll back into the pool
-5. Optional: stake on your own streak for a multiplier, back someone else's goal, or top up USDC in one tap via Blink
+4. SPOTTER, the settlement agent, buys the verification it needs per claim, decides, and calls `settle()` from its own Circle wallet — releasing the sponsor's pool to the achievers (optionally to a private Unlink account derived from their own wallet signature, with no on-chain link to the goal). Forfeits roll back into the pool. A cron sweep settles claims whose period ends later, so a payout never waits on someone keeping a browser tab open
+5. Optional: stake on your own streak for a multiplier, back someone else's goal, or claim a small testnet USDC grant to cover Arc gas
 
 ## Architecture
 
