@@ -34,6 +34,8 @@ import {
 import {
   ARC_CHAIN_ID,
   MOCK_PORT,
+  MOCK_SPOTTER_ADDRESS,
+  MOCK_SPOTTER_USDC,
   emptyState,
   goalIdFor,
   participantKey,
@@ -720,6 +722,64 @@ function handleAttester(
   return { status: 404, payload: { detail: `no attester route for ${path}` } };
 }
 
+// ----------------------------------------------------------------- circle
+
+/**
+ * The two Circle reads /api/agent/wallet performs, and nothing more.
+ *
+ * The SDK unwraps Circle's `{ data: ... }` envelope before the app sees it,
+ * so these payloads carry the envelope exactly as api.circle.com would.
+ * `CIRCLE_WALLET_ID` is a placeholder in this suite; whatever id the app asks
+ * for is echoed back, because the identity under test is the address, not the
+ * id. Every other Circle endpoint — all of them writes — stays refused.
+ */
+function handleCircle(
+  path: string,
+  method: string,
+): { status: number; payload: unknown } {
+  const balances = path.match(/^\/v1\/w3s\/wallets\/([^/]+)\/balances$/);
+  if (method === "GET" && balances !== null) {
+    return {
+      status: 200,
+      payload: {
+        data: {
+          tokenBalances: [
+            {
+              token: { symbol: "USDC", id: "e2e-usdc-token" },
+              amount: MOCK_SPOTTER_USDC,
+            },
+          ],
+        },
+      },
+    };
+  }
+
+  const wallet = path.match(/^\/v1\/w3s\/wallets\/([^/]+)$/);
+  if (method === "GET" && wallet !== null) {
+    return {
+      status: 200,
+      payload: {
+        data: {
+          wallet: {
+            id: decodeURIComponent(wallet[1]),
+            address: MOCK_SPOTTER_ADDRESS,
+            blockchain: "ARC-TESTNET",
+            accountType: "EOA",
+          },
+        },
+      },
+    };
+  }
+
+  return {
+    status: 501,
+    payload: {
+      code: 501,
+      message: `the Circle API is stubbed out in this suite (${path})`,
+    },
+  };
+}
+
 // ----------------------------------------------------------------- server
 
 function readBody(request: IncomingMessage): Promise<string> {
@@ -821,14 +881,15 @@ const server = createServer((request, response) => {
 
     if (path.startsWith("/circle")) {
       // CIRCLE_API_BASE_URL points here so no Circle SDK call can reach
-      // api.circle.com from a test run. Nothing on Path A is supposed to call
-      // Circle at all (SPOTTER_WALLET_ADDRESS is unset), so this stub refuses
-      // everything: /api/agent/wallet answers 500 and the console renders its
-      // not-configured state, deterministically and offline.
-      sendJson(response, 501, {
-        code: 501,
-        message: `the Circle API is stubbed out in this suite (${path})`,
-      });
+      // api.circle.com from a test run. The only Circle traffic Path A is
+      // supposed to produce is /api/agent/wallet reading SPOTTER's identity
+      // back (SPOTTER_WALLET_ADDRESS is unset, so the run loop never signs
+      // with Circle), so this stub answers exactly those two reads with a
+      // provisioned wallet — the console and the header strip render the real
+      // agent state instead of a not-configured error card — and refuses
+      // everything else: any write reaching here is a bug worth failing on.
+      const result = handleCircle(path.slice("/circle".length), method);
+      sendJson(response, result.status, result.payload);
       return;
     }
 

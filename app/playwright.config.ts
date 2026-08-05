@@ -84,8 +84,9 @@ export default defineConfig({
         JUNCTION_BASE_URL: MOCK_JUNCTION_URL,
         CONFIDENTIAL_AI_BASE_URL: MOCK_ATTESTER_URL,
         // The Circle SDK behind /api/agent/wallet answers to this too; the
-        // mock's /circle stub refuses every call, which is exactly the
-        // not-configured console state the suite expects.
+        // mock's /circle stub serves SPOTTER's provisioned wallet for the two
+        // reads that route makes and refuses everything else, so the /agent
+        // console renders the real agent state, deterministically and offline.
         CIRCLE_API_BASE_URL: `${MOCK_BASE_URL}/circle`,
         // No build metrics phoned home from a hermetic run.
         NEXT_TELEMETRY_DISABLED: "1",

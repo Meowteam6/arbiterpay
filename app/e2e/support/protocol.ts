@@ -58,6 +58,18 @@ export const USDC_ADDRESS: Address =
 
 export const ARC_CHAIN_ID = 5042002;
 
+/**
+ * The agent wallet the mock Circle stub reports for SPOTTER. Made up like the
+ * contract addresses above: it is only ever rendered by the /agent console and
+ * the header balance strip, and nothing in the suite can move money from it.
+ */
+export const MOCK_SPOTTER_ADDRESS: Address =
+  "0x4444444444444444444444444444444444444444";
+/** SPOTTER's USDC balance as Circle's balance endpoint reports it (whole
+ *  units, not base units) — comfortably above the "out of budget" floor so
+ *  every screen renders the healthy agent state. */
+export const MOCK_SPOTTER_USDC = "25.50";
+
 // ------------------------------------------------ local, invented, inert
 
 /**
