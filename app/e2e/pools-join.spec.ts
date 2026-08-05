@@ -18,7 +18,11 @@ import { emptyState, joinedParticipant, participantKey, pool } from "./support/p
 import { expect, test, testWallet } from "./support/test";
 
 test.describe("pool list", () => {
-  test("groups pools by what a visitor can act on", { tag: "@demo" }, async ({ page, mock }) => {
+  test("groups pools by what a visitor can act on", { tag: "@demo" }, async ({
+    page,
+    mock,
+    demoBeat,
+  }) => {
     const state = emptyState();
     state.pools = [
       pool({ id: "1", initiative: "Sleep Streak", balance: "50000000" }),
@@ -36,19 +40,23 @@ test.describe("pool list", () => {
     await page.goto("/pools");
 
     await expect(page.getByText("Live, open to join")).toBeVisible();
+    await demoBeat();
 
     const live = page.locator("section", { hasText: "Live, open to join" });
     await expect(live.locator('a[href="/pools/1"]')).toBeVisible();
     await expect(live.locator('a[href="/pools/2"]')).toBeVisible();
     // A settled pool is history, never an invitation.
     await expect(live.locator('a[href="/pools/3"]')).toHaveCount(0);
+    await demoBeat();
     const settled = page.locator("section").filter({ hasText: "Old Pool" });
     await expect(settled.locator('a[href="/pools/3"]')).toBeVisible();
+    await demoBeat();
   });
 
   test("badges each pool with how its goal is verified", { tag: "@demo" }, async ({
     page,
     mock,
+    demoBeat,
   }) => {
     const state = emptyState();
     state.pools = [
@@ -58,12 +66,15 @@ test.describe("pool list", () => {
     await mock.seed(state);
 
     await page.goto("/pools");
+    await demoBeat();
 
     // The badge is derived from the on-chain "[doc]" marker, so this asserts
     // the chain read reached the browser intact.
     await expect(page.locator('a[href="/pools/1"]')).toContainText("Wearable");
     await expect(page.locator('a[href="/pools/2"]')).toContainText("Document");
+    await demoBeat();
     await expect(page.locator('a[href="/pools/1"]')).toContainText("50.00");
+    await demoBeat();
   });
 
   test("separates an ended pool nobody joined from one awaiting settlement", async ({
@@ -108,6 +119,7 @@ test.describe("pool detail", () => {
   test("offers the join panel on a live pool and refuses to fake a wallet", { tag: "@demo" }, async ({
     page,
     mock,
+    demoBeat,
   }) => {
     const state = emptyState();
     state.pools = [
@@ -129,18 +141,25 @@ test.describe("pool detail", () => {
       }),
     ).toBeVisible();
     await expect(page.getByText("50.00 USDC")).toBeVisible();
+    await demoBeat();
     const joinPanel = page.locator("section", { hasText: "Join this pool" });
     await expect(
       joinPanel.getByRole("heading", { name: "Join this pool" }),
     ).toBeVisible();
     await expect(joinPanel.getByText("No one has joined yet")).toBeVisible();
     await expect(joinPanel).toContainText("1.00 USDC entry fee");
+    await demoBeat();
 
     // The honest failure: a build with no wallet integration says so inside
     // the join panel instead of rendering a button that cannot sign.
     await expect(
       joinPanel.getByText("Sign-in is not configured"),
     ).toBeVisible();
+    // The refusal is the proof this test exists for, and the panel sits below
+    // the fold at the demo viewport — bring it into frame so the recording's
+    // held final shot shows it rather than the stats grid clipping it.
+    await joinPanel.scrollIntoViewIfNeeded();
+    await demoBeat();
   });
 
   test("closes joining once the period has ended", async ({ page, mock }) => {

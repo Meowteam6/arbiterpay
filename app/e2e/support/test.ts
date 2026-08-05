@@ -63,11 +63,20 @@ export interface DemoOptions {
   demoHoldMs: number;
 }
 
+/** How long one demoBeat lingers when a demo profile is recording. */
+const DEMO_BEAT_MS = 1_200;
+
 // The fixture callback's second argument is conventionally named `use`, which
 // trips eslint's rules-of-hooks (it reads any `use(...)` call outside a
 // component as React's `use` hook). `provide` is the same function under a
 // name that is not a React primitive.
-export const test = base.extend<DemoOptions & { mock: MockUpstream; arcRpc: void }>({
+export const test = base.extend<
+  DemoOptions & {
+    mock: MockUpstream;
+    arcRpc: void;
+    demoBeat: () => Promise<void>;
+  }
+>({
   demoHoldMs: [0, { option: true }],
 
   mock: async ({ request }, provide) => {
@@ -76,6 +85,19 @@ export const test = base.extend<DemoOptions & { mock: MockUpstream; arcRpc: void
     // previous one's pools.
     await upstream.seed(emptyState());
     await provide(upstream);
+  },
+
+  /**
+   * A short on-camera pause after a meaningful step (a page painting, a value
+   * typed, a proof revealing), so demo footage reads as a followable flow
+   * rather than one action and a freeze-frame. Strictly a no-op outside the
+   * demo profile: with demoHoldMs at 0 it resolves immediately, so the main
+   * suite's speed and behavior are untouched.
+   */
+  demoBeat: async ({ page, demoHoldMs }, provide) => {
+    await provide(async () => {
+      if (demoHoldMs > 0) await page.waitForTimeout(DEMO_BEAT_MS);
+    });
   },
 
   // Auto-applied: every page in this suite reads the mock chain, and the one

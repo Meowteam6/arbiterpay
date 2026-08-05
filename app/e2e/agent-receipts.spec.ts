@@ -31,6 +31,7 @@ test.describe("SPOTTER console", () => {
     page,
     request,
     mock,
+    demoBeat,
   }) => {
     const claimant = testWallet("receipt-paid");
     const state = emptyState();
@@ -50,6 +51,16 @@ test.describe("SPOTTER console", () => {
     };
     await mock.seed(state);
 
+    // On the console FIRST, before the claim exists: the recording opens on
+    // painted UI (identity card, empty feed) instead of holding a blank frame
+    // while the claim below is driven over HTTP, and the reload afterwards
+    // shows the receipt appearing on a screen the viewer has already seen.
+    await page.goto("/agent");
+    await expect(
+      page.getByRole("heading", { name: "Recent claims" }),
+    ).toBeVisible();
+    await demoBeat();
+
     const submitted = await submitEvidence(request, {
       poolId: "1",
       address: claimant.address,
@@ -63,13 +74,14 @@ test.describe("SPOTTER console", () => {
     });
     expect(run.status).toBe("recorded");
 
-    await page.goto("/agent");
+    await page.reload();
 
     await expect(
       page.getByRole("heading", { name: "Recent claims" }),
     ).toBeVisible();
     const card = page.locator("li").filter({ hasText: shortGoal(goalId) });
     await expect(card).toBeVisible();
+    await demoBeat();
 
     // What SPOTTER bought, what it cost, and how it settled — the whole point
     // of the screen.
@@ -83,6 +95,7 @@ test.describe("SPOTTER console", () => {
     // The pool period is still running, so the card promises the settlement
     // moment rather than a payout that has not happened.
     await expect(card).toContainText(/settle|Settle/);
+    await demoBeat();
 
     // The redaction boundary: the enclave's prose about a medical document is
     // in the owner's ledger and must never reach this unauthenticated page.
@@ -95,6 +108,7 @@ test.describe("SPOTTER console", () => {
     page,
     request,
     mock,
+    demoBeat,
   }) => {
     const claimant = testWallet("receipt-wearable");
     const state = emptyState();
@@ -112,6 +126,14 @@ test.describe("SPOTTER console", () => {
     state.junction = { mode: "up", connected: true, days: sleepDays(9, 88) };
     await mock.seed(state);
 
+    // Console on camera before the claim runs, same as the document test:
+    // the recording opens on painted UI, then the reload reveals the receipt.
+    await page.goto("/agent");
+    await expect(
+      page.getByRole("heading", { name: "Recent claims" }),
+    ).toBeVisible();
+    await demoBeat();
+
     const goalId = goalIdFor(4n, claimant.address);
     const run = await runClaimToCompletion(request, {
       goalId,
@@ -121,10 +143,11 @@ test.describe("SPOTTER console", () => {
     });
     expect(run.status).toBe("recorded");
 
-    await page.goto("/agent");
+    await page.reload();
 
     const card = page.locator("li").filter({ hasText: shortGoal(goalId) });
     await expect(card).toBeVisible();
+    await demoBeat();
 
     // The provider read SPOTTER bought, and the verdict it derived from it.
     // Same receipt shape as a document claim: what was bought, what it cost,
@@ -133,6 +156,7 @@ test.describe("SPOTTER console", () => {
     await expect(card).toContainText("metered");
     await expect(card).toContainText("decision");
     await expect(card).toContainText("pay");
+    await demoBeat();
   });
 
   test("shows a refused claim as no-pay with no payout line", async ({
