@@ -185,16 +185,3 @@ export function receiptToKeep(
   if (shown === undefined || shown.ledger.length === 0) return undefined;
   return shown.ledger;
 }
-
-/**
- * The ledger a poll should render. A poll that lost visibility mid-run (the
- * cached signature aged out and the re-sign was refused) keeps whatever was
- * already on screen: money that moved must not vanish from the receipt because
- * the next request went out unsigned.
- */
-export function mergeRunLedger(
-  previous: LedgerEntry[],
-  body: ClaimReadBody,
-): LedgerEntry[] {
-  return Array.isArray(body.ledger) ? (body.ledger as LedgerEntry[]) : previous;
-}

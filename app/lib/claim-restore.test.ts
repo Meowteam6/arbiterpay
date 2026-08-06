@@ -8,7 +8,6 @@ import {
   claimScreenOf,
   claimVisibilityOf,
   emptyClaimScreen,
-  mergeRunLedger,
   nextClaimScreen,
   receiptToKeep,
 } from "@/lib/claim-restore";
@@ -285,19 +284,5 @@ describe("receiptToKeep", () => {
     const restored = claimScreenOf(shown);
     expect(receiptToKeep(restored)).toEqual(shown);
     expect(receiptToKeep(emptyClaimScreen())).toBeUndefined();
-  });
-});
-
-describe("mergeRunLedger", () => {
-  it("takes the fresh ledger when the poll carried one", () => {
-    const next = [plan("junction-read")];
-    expect(mergeRunLedger([], { ledger: next })).toBe(next);
-  });
-
-  it("keeps the rows already on screen when a poll comes back withheld", () => {
-    // Money that moved must not vanish from the receipt because a cached
-    // signature aged out mid-run.
-    const shown = [plan("junction-read"), spend("junction-read", "w-1")];
-    expect(mergeRunLedger(shown, { hasLedger: true })).toBe(shown);
   });
 });
