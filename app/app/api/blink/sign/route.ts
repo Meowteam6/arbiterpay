@@ -6,8 +6,13 @@
 // it POSTs the deposit request to this endpoint and expects a signed payload
 // back. Blink verifies the signature against the merchant's registered public
 // key before pulling USDC, so this route is the trust anchor for the whole
-// one-tap top-up flow (see app/lib/blink.ts, which sets `signer` to this path
-// via NEXT_PUBLIC_BLINK_SIGNER_ENDPOINT, default "/api/blink/sign").
+// one-tap top-up flow.
+//
+// NO IN-REPO CALLER. The browser widget that pointed the SDK's `signer` at
+// this path was never mounted on any page and has been removed. The route is
+// left standing because it is a money endpoint and deleting it is a call for
+// the repo owner, not a dead-code sweep. Anything reaching it now is external.
+// Its limits below are what make that survivable; do not relax them.
 //
 // CONTRACT (confirmed from docs.blink.cash integration/signer-endpoint):
 //
