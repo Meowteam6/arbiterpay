@@ -1,5 +1,5 @@
 // USDC is 6 decimals on Arc. All SDK boundaries use base-unit strings.
-import { parseUnits, formatUnits } from "viem";
+import { parseUnits } from "viem";
 
 export const USDC_DECIMALS = 6 as const;
 
@@ -10,8 +10,4 @@ export function toBaseUnits(amount: string): string {
     );
   }
   return parseUnits(amount.trim(), USDC_DECIMALS).toString();
-}
-
-export function fromBaseUnits(base: string): string {
-  return formatUnits(BigInt(base), USDC_DECIMALS);
 }

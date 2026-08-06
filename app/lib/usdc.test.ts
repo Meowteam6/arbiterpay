@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { toBaseUnits, fromBaseUnits, USDC_DECIMALS } from "@/lib/usdc";
+import { toBaseUnits, USDC_DECIMALS } from "@/lib/usdc";
 
 describe("usdc", () => {
   it("has 6 decimals", () => {
@@ -12,9 +12,5 @@ describe("usdc", () => {
   });
   it("rejects more than 6 decimal places", () => {
     expect(() => toBaseUnits("1.1234567")).toThrow();
-  });
-  it("round-trips back to a decimal string", () => {
-    expect(fromBaseUnits("1990000")).toBe("1.99");
-    expect(fromBaseUnits("1000000")).toBe("1");
   });
 });
