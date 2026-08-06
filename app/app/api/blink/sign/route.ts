@@ -14,6 +14,11 @@
 // the repo owner, not a dead-code sweep. Anything reaching it now is external.
 // Its limits below are what make that survivable; do not relax them.
 //
+// This route implements the SDK's protocol but does not import it: with the
+// widget gone, @swype-org/deposit is a dependency no file imports. Dropping it
+// from package.json needs the lockfile regenerated, so it belongs with the
+// decision about this route rather than ahead of it.
+//
 // CONTRACT (confirmed from docs.blink.cash integration/signer-endpoint):
 //
 //   Request JSON the SDK POSTs to us:
