@@ -1,7 +1,11 @@
 "use client";
 
 import { useCallback } from "react";
-import { useDynamicContext, useIsLoggedIn } from "@dynamic-labs/sdk-react-core";
+import {
+  useDynamicContext,
+  useIsLoggedIn,
+  useUserWallets,
+} from "@dynamic-labs/sdk-react-core";
 import { isEthereumWallet } from "@dynamic-labs/ethereum";
 import {
   type Account,
@@ -62,20 +66,29 @@ function useDynamicWallet(): EmbeddedWalletState {
   const { sdkHasLoaded, primaryWallet, setShowAuthFlow, handleLogOut } =
     useDynamicContext();
   const isLoggedIn = useIsLoggedIn();
+  const userWallets = useUserWallets();
+
+  // Email sign-in populates primaryWallet (the turnkey embedded wallet), but an
+  // EXTERNAL wallet connected under initialAuthenticationMode "connect-only"
+  // lands in userWallets while primaryWallet stays null — there is no
+  // authenticated session to promote one. Reading primaryWallet alone meant a
+  // MetaMask user connected successfully and the header never left "Sign in".
+  // Fall back to the first connected wallet so both paths resolve identically.
+  const activeWallet = primaryWallet ?? userWallets[0] ?? null;
 
   const address =
-    primaryWallet !== null && /^0x[0-9a-fA-F]{40}$/.test(primaryWallet.address)
-      ? (primaryWallet.address as Address)
+    activeWallet != null && /^0x[0-9a-fA-F]{40}$/.test(activeWallet.address)
+      ? (activeWallet.address as Address)
       : null;
 
   const getArcWalletClient = useCallback(async (): Promise<ArcWalletClient> => {
-    if (primaryWallet === null || !isEthereumWallet(primaryWallet)) {
+    if (activeWallet == null || !isEthereumWallet(activeWallet)) {
       throw new Error("No EVM wallet connected. Sign in first.");
     }
-    await primaryWallet.switchNetwork(arcTestnet.id);
-    const walletClient = await primaryWallet.getWalletClient();
+    await activeWallet.switchNetwork(arcTestnet.id);
+    const walletClient = await activeWallet.getWalletClient();
     return walletClient as ArcWalletClient;
-  }, [primaryWallet]);
+  }, [activeWallet]);
 
   return {
     ready: sdkHasLoaded,

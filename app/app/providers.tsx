@@ -69,12 +69,31 @@ export default function Providers({ children }: { children: ReactNode }) {
     <DynamicContextProvider
       settings={{
         environmentId,
-        // connect-only skips the SIWE ownership signature on login (the wallet
-        // sign step that threw UserRejectedRequestError 4001 in prod). The app
-        // only gates on useIsLoggedIn()/primaryWallet and Unlink derives its
-        // own signature separately, so no login signature is needed.
+        // connect-only skips the SIWE ownership signature on login — the step
+        // that surfaces as "Message signature denied" in the modal when a
+        // MetaMask user does not sign. The app never needs that signature:
+        // it gates on primaryWallet (see lib/wallet.ts, which treats a
+        // connected wallet as authenticated precisely because connect-only
+        // never sets isLoggedIn), and Unlink derives its own signature.
+        //
+        // This setting was NOT the reason sign-in was dead. Nor was the old
+        // hand-rolled button: DynamicContextProvider renders DynamicAuthFlow
+        // itself, and DynamicConnectButton's onClick is just
+        // setSelectedWalletConnectorKey(null) + setShowAuthFlow(true) — so the
+        // flag always had a listener. What was actually broken is in
+        // lib/wallet.ts: connect-only never promotes a primaryWallet for an
+        // external wallet, and the app read primaryWallet alone. Keep
+        // connect-only; it keeps the flow signature-free.
         initialAuthenticationMode: "connect-only",
         walletConnectors: [EthereumWalletConnectors],
+        // Drop MetaMask from the login modal. It is the one connector that
+        // reliably fails sign-in here, and it is the only one we special-case
+        // (see useMetamaskSdk below). Email and the other external wallets
+        // stay. Matching on the key prefix rather than the exact "metamask"
+        // string because the SDK also ships a "metamaskevm" key, and an exact
+        // RemoveWallets(["metamask"]) would leave that one showing.
+        walletsFilter: (wallets) =>
+          wallets.filter((w) => !w.key.toLowerCase().startsWith("metamask")),
         // Dynamic's default (useMetamaskSdk: true) routes MetaMask through its
         // new multichain "connect" SDK, which establishes a MetaMask connection
         // but does NOT bind the wallet into Dynamic state in connect-only mode —

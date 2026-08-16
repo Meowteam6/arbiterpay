@@ -2,6 +2,7 @@
 
 import Link from "next/link";
 import { usePathname } from "next/navigation";
+import { DynamicConnectButton } from "@dynamic-labs/sdk-react-core";
 import { DEMO_CHROME, DYNAMIC_CONFIGURED } from "@/lib/config";
 import { useEmbeddedWallet } from "@/lib/wallet";
 import AgentStrip from "@/components/AgentStrip";
@@ -46,7 +47,7 @@ function NavLinks() {
 }
 
 function AuthControls() {
-  const { ready, authenticated, login, logout } = useEmbeddedWallet();
+  const { ready, authenticated, logout } = useEmbeddedWallet();
 
   if (!ready) {
     return (
@@ -55,14 +56,16 @@ function AuthControls() {
   }
 
   if (!authenticated) {
+    // DynamicConnectButton, NOT a bare button calling setShowAuthFlow.
+    // setShowAuthFlow only toggles state on the DynamicAuthFlow SDK component,
+    // and this app mounts no Dynamic UI component anywhere — so the old custom
+    // button flipped a flag nothing was listening to. No modal, no network
+    // call, no thrown error: sign-in was silently dead in every build.
+    // DynamicConnectButton owns the flow and still takes our own styling.
     return (
-      <button
-        type="button"
-        onClick={login}
-        className="min-h-11 rounded-lg bg-accent-strong px-4 py-2 text-sm font-semibold text-background hover:bg-accent"
-      >
+      <DynamicConnectButton buttonClassName="min-h-11 rounded-lg bg-accent-strong px-4 py-2 text-sm font-semibold text-background hover:bg-accent">
         Sign in
-      </button>
+      </DynamicConnectButton>
     );
   }
 
