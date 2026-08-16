@@ -44,6 +44,26 @@ Honest about the payee: this is agent-to-service on the buy side and agent-to-hu
 
 `arbiterpay` is a leftover from the rejected reframe and is almost certainly wrong. This is GoHealthMe. Rename before the repo goes public — GitHub redirects make it free. Andre decides.
 
+## Who owns this — Meowteam6
+
+This repo belongs to **Meowteam6**, the two-founder company run by Andre Chuabio and Nikki Hu. GitHub org is `Meowteam6`; this repo is `Meowteam6/arbiterpay`. Anything written here is read by both founders, so write for that audience.
+
+Five repos, and this one does not stand alone:
+
+| Repo | Role |
+|---|---|
+| `claudemeow` | Plugin, guards, executor, Telegram bridge — the substrate the others run on |
+| `MeritAI` | **Main XPRIZE entry** (Build with Gemini, $2M pool, Professional Services Access) |
+| `arbiterpay` | **This repo. Circle Agentic Economy entry** ($50k, one winner, stacks on the main prize) |
+| `gohealthme` | The ancestor. Frozen ETHGlobal NY 2026 artifact — never modify it from here |
+| `synapse` | Dormant |
+
+**Both prize tracks submit against the same deadline: 2026-08-17, 1:00 PM PT.** MeritAI is the main entry; this is the bonus that stacks on it. Work here competes for hours with MeritAI, so scope creep in this repo costs the $2M track, not just this one.
+
+Operating model: work is queued through a Telegram group and the MeowConcierge bot into GitHub Issues, then executed by launchd executors on an always-on M4 Mac mini, one git worktree per ticket, ending in a draft PR. Nobody codes on the mini directly.
+
+The company brain is the **MI6 Obsidian vault** at `/Users/andrechuabio/Documents/Meow_Intelligence_6(MI6)` — company decisions, repo dossiers, and the sprint ledger live there, not in this repo. It is shared with Nikki and multi-writer, and the Obsidian MCP server cannot reach it (use absolute shell paths; mind the literal parentheses). Notes for this build: `Projects/GoHealthMe-Circles.md`; repo dossier: `Repos/ArbiterPay.md`; deadline ledger: `Org/XPRIZE-Sprint.md`; append-only decision log: `Org/Decisions.md`. Never put secrets in the vault.
+
 ## Relationship to the original gohealthme repo
 
 Full-history clone of `AndreChuabio/gohealthme` taken at `pre-circle-pivot` (2026-07-30).
@@ -77,6 +97,13 @@ The bar is *"genuinely agent-driven — no human manual checkout."*
 - Live contracts (Arc testnet, gate ON): HealthPools `0xc4274eF2cBe28f77Af31b980055Cc1171818390C`, HealthVerdict `0x9bf5e4b54361DEAca4314c1d8de3aeB30111F042`, KeystoneForwarder `0x76c9cf548b4179F8901cda1f8623568b58215E62`.
 - `goalId` is `keccak256(abi.encode(pools, poolId, participant, periodStart))`. Four layers must agree: both contracts, the CRE workflow, and `app/lib/server/verdict.ts` (which reads it from the contract rather than re-deriving — keep it that way).
 - The settlement gate is ON: `settle()` pays only where `canSettle(goalId)` is true. A missing registry write means a successful transaction that pays nobody. Assert on the USDC delta, never on transaction success alone.
+- **The "nothing was listening to `setShowAuthFlow`" theory is FALSE — do not re-derive it.** Verified against the installed SDK (`@dynamic-labs/sdk-react-core@4.88.6`): `DynamicContextProvider` renders `DynamicAuthFlow` itself, and `DynamicConnectButton`'s onClick is literally `setSelectedWalletConnectorKey(null); setShowAuthFlow(true);` — the same call the old hand-rolled button made. The flag always had a listener. The real fix is the `primaryWallet ?? userWallets[0]` resolution below. `components/Header.tsx` uses `DynamicConnectButton` anyway (it also clears a stale connector key and gates on `projectSettings` loading), but note `login()` is still the sign-in path in nine other components — if the bare-button theory were true the app would still be broken everywhere else.
+- **MetaMask is filtered out of the login modal** via `walletsFilter` in `app/app/providers.tsx`. It matches on the `metamask` key *prefix*, because the SDK also ships a `metamaskevm` key that an exact `RemoveWallets(["metamask"])` would miss. Email, Coinbase, WalletConnect and Trust remain. Verified in-browser: the shortlist omits it and searching the full 585-wallet list returns "Wallet not available". `useMetamaskSdk: false` is now inert but harmless.
+- **The Arc RPC reorder from PR #29 only landed in `app/lib/chains.ts`.** `app/lib/dynamic.ts` still lists the demoted `rpc.testnet.arc.network` as its sole RPC, and `app/app/providers.tsx` still leads with it and still includes the drpc endpoint that answers 400. This matters because Dynamic builds the `wallet_addEthereumChain` payload from the `dynamic.ts` descriptor, so external-wallet users get the known-bad endpoint written into their wallet. One line in each file, still unfixed.
+- **`primaryWallet` is null for external wallets under connect-only.** Email sign-in populates it (the turnkey embedded wallet), but a MetaMask/Coinbase connection lands in `useUserWallets()` with no authenticated session to promote a primary. Reading `primaryWallet` alone meant a wallet user connected successfully and the header never left "Sign in". `lib/wallet.ts` now resolves `primaryWallet ?? userWallets[0]`. Verified end to end on production: a real email login flips the header to "Sign out" plus the wallet address.
+- **Keep `initialAuthenticationMode: "connect-only"` in `app/app/providers.tsx`.** It skips the SIWE ownership signature, which is what surfaces as "Message signature denied" in the modal for MetaMask users. It was never the reason sign-in was dead, and measured on production it does NOT cost the email view — the modal shows email and the wallet list together. Removing it re-introduces the signature failure. `lib/wallet.ts` already treats a connected wallet as authenticated precisely because connect-only never sets `isLoggedIn`.
+- **These CSP / CORS / allowed-origin theories are all disproved. Do not re-derive them.** The app serves no CSP on any surface (no header, no meta tag, no `middleware.ts`); the policy seen in DevTools comes from Vercel's SSO login page and the MetaMask extension frame. All three Arc RPCs return correct CORS from the browser origin, so PR #29's premise is stale. Dynamic returns a correct `access-control-allow-origin` for production, preview, and localhost, so Allowed Origins was never the blocker. Note `curl` ignores CORS — a `200` proves nothing unless you check the ACAO header.
+- **Vercel SSO protection is ON** (`all_except_custom_domains`), so every preview and `*.vercel.app` URL sits behind a Vercel login wall. Test on the production alias, never a preview URL. A custom domain is exempt — which is also the escape from Blockaid flagging `*.vercel.app` (3,705 of its siblings are on MetaMask's blocklist; this app is on none).
 
 ## Build on Circle's own scaffold
 
@@ -108,6 +135,16 @@ Every hour here is an hour not spent on the three mandatory proofs.
 ## Research-first
 
 Read before changing: this file, `HANDOFF.md`, `DEPLOYMENTS.md`, and the specific route or contract. Map the flow end to end (evidence -> attester verdict -> HealthVerdict registry -> agent decision -> settle) before touching any link. Expand existing code; do not duplicate. Check existing branches before implementing a fix — work has been duplicated that way before.
+
+## Reporting a bug fix — do not hand back a status report
+
+When Andre reports something broken, the deliverable is the **fixed, verified thing** — not an analysis of it. Drive it to done in one pass:
+
+1. **Reproduce it in a real browser first.** Notes and prior diagnoses in this file, in memory, and in commit messages have all been wrong about this app before. A premise older than a few days is a hypothesis, not a fact — re-measure it.
+2. **Verify in the running app, not by reading code.** Check the live DOM, network, and console. Shadow DOM hides things: Dynamic renders into `.dynamic-shadow-dom`, so an empty accessibility tree or a clean screenshot does not mean nothing rendered.
+3. **Browser-automation clicks are not real clicks.** The harness's `left_click` does not fire the full pointer sequence React needs, and it silently no-ops on some handlers. Before concluding a control is broken, dispatch `pointerdown/mousedown/pointerup/mouseup/click` or call `.click()` directly. A fix was nearly abandoned as failed over exactly this.
+4. **Do not stack fixes.** If a fix does not work, return to evidence. Three failed fixes means the architecture is wrong, not that the fourth attempt will land.
+5. Report only once it works, with the verification. Interim theories waste his time and read as excuses.
 
 ## Stack
 
