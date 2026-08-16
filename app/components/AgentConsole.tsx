@@ -7,12 +7,21 @@
 // statuses, and tx hashes only, never the model's prose about anyone's
 // medical documents.
 
+import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import { arcTxUrl } from "@/lib/chains";
 import { toUsd2 } from "@/lib/agent-receipt";
 import type { PublicFeedClaim } from "@/lib/server/agent/feed-view";
 import { settleMomentLine } from "@/components/AgentReceipt";
 import { EmptyState, Money, Skeleton } from "@/components/ui";
+
+// Where the empty state sends a first-time visitor. Pool 13 is picked
+// deliberately: it is a [doc] pool with bountyModel = 1 (pro-rata split) and a
+// funded balance, so a verified claim actually pays. The live bountyModel = 0
+// pools were created with entryFee = 0, which makes totalOwed zero and settles
+// to nobody - never point this at one of those. Verify the pool is still
+// unsettled with periodEnd in the future before a demo.
+const CLAIMABLE_POOL_ID = 13;
 
 interface WalletResponse {
   address?: string;
@@ -190,7 +199,15 @@ export default function AgentConsole() {
         ) : (
           <EmptyState
             title="SPOTTER has done nothing yet."
-            detail="Give it something to verify."
+            detail="Join a pool, upload a record, and SPOTTER buys the verification and pays out here."
+            action={
+              <Link
+                href={`/pools/${CLAIMABLE_POOL_ID}`}
+                className="inline-flex min-h-11 items-center rounded-lg bg-accent-strong px-4 py-2 text-sm font-semibold text-background hover:bg-accent"
+              >
+                Give it something to verify
+              </Link>
+            }
           />
         )}
       </section>
