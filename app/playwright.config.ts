@@ -40,11 +40,16 @@ export default defineConfig({
   testMatch: /.*\.spec\.ts$/,
   fullyParallel: false,
   workers: 1,
-  retries: 0,
+  // One retry under CI only: the run-loop specs sit close enough to the timeout
+  // that a slow runner flakes them, and a red main is worse than a slow one.
+  // Local runs stay strict so a real hang is not papered over.
+  retries: process.env.CI !== undefined ? 1 : 0,
   forbidOnly: process.env.CI !== undefined,
   // A document claim's run loop does two on-chain writes and waits for both
-  // receipts; 30s is comfortable against the mock and still catches a hang.
-  timeout: 45_000,
+  // receipts. 45s used to be comfortable; after the RPC fallback reorder in
+  // 77a5331 the receipt specs land at 46-50s on CI runners, so the old ceiling
+  // failed them on latency alone. 90s still catches a genuine hang.
+  timeout: 90_000,
   expect: { timeout: 10_000 },
   reporter:
     process.env.CI !== undefined

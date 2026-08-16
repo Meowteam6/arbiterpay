@@ -64,3 +64,12 @@ every pre-2026-07-27 HealthPools are dead.
   A (verdict) 6993004 -> 8993004 = +2.00 USDC | B (no verdict) 478608 -> 478608 = +0
 - Settle tx: 0xfdaff54d7a38d0c38a2ac94048086ef95b4475566dc7e9084b48d20bc34d28f6
 - Confirms the new goalId schema and the gate are load-bearing on chain: no verdict -> no payout.
+
+## Demo reset 2026-07-31T06:36:20Z
+- HealthPools: 0xc4274eF2cBe28f77Af31b980055Cc1171818390C
+- Explorer: https://testnet.arcscan.app/address/0xc4274eF2cBe28f77Af31b980055Cc1171818390C
+- Seeded: sleep (Dreamwell), recovery (Vitality), steps (Iron Gym),
+          flu-shot [doc], screening [doc] (preventive-care, document-verified)
+- HealthVerdict: 0x9bf5e4b54361DEAca4314c1d8de3aeB30111F042 (attester 0xA56eAD3A32b6261bDE6C2A45495C9250084F7F2D)
+- Forwarder: 0x76c9cf548b4179F8901cda1f8623568b58215E62 (Arc KeystoneForwarder — CRE onReport path LIVE)
+- Settlement gate: ON (settle requires canSettle(goalId))
