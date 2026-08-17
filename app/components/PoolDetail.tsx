@@ -503,7 +503,7 @@ export default function PoolDetail({ id }: { id: string }) {
         </section>
       )}
 
-      {phase !== "settled" ? (
+      {phase !== "settled" && poolCanPay(pool) ? (
         <div className="space-y-4">
           <p className="text-xs font-semibold uppercase tracking-wide text-muted">
             Sponsor action
