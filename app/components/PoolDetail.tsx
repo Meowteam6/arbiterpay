@@ -452,9 +452,15 @@ export default function PoolDetail({ id }: { id: string }) {
 
           {poolCanPay(pool) ? claimSection : null}
 
-          <section className="rounded-2xl border border-edge bg-surface p-5">
-            <BackGoal poolId={pool.id} />
-          </section>
+          {/* Backers are only ever paid on ACHIEVERS (HealthPools._payBackers).
+              A pool that cannot pay its achievers also cannot make backing win,
+              and with join/upload suppressed no one here can become an achiever,
+              so a stake would only forfeit. Hide backing on unpayable pools. */}
+          {poolCanPay(pool) ? (
+            <section className="rounded-2xl border border-edge bg-surface p-5">
+              <BackGoal poolId={pool.id} />
+            </section>
+          ) : null}
         </div>
       ) : phase === "expired" ? (
         <div className="space-y-4">
