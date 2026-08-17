@@ -661,7 +661,8 @@ function EvidenceUploadInner({
 
         {status.runStatus === "verifying" ? (
           <p className="text-sm text-muted">
-            SPOTTER is working. Rows print as they happen.
+            SPOTTER is working — this usually takes about half a minute. Rows
+            print as they happen; you can keep this open.
           </p>
         ) : null}
 

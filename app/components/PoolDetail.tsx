@@ -36,7 +36,7 @@ import {
   formatUsdc,
   shortAddress,
 } from "@/lib/contract";
-import { poolPhase } from "@/lib/pool-lifecycle";
+import { poolCanPay, poolPhase } from "@/lib/pool-lifecycle";
 import { useEmbeddedWallet } from "@/lib/wallet";
 
 function formatDay(seconds: bigint): string {
@@ -404,7 +404,19 @@ export default function PoolDetail({ id }: { id: string }) {
           <p className="text-xs font-semibold uppercase tracking-wide text-muted">
             Participant actions
           </p>
-          {unverifiableNow && !hasJoined ? (
+          {!poolCanPay(pool) ? (
+            <section className="rounded-2xl border border-warning/40 bg-warning/10 p-5">
+              <h2 className="text-lg font-semibold text-warning">
+                This pool cannot pay out
+              </h2>
+              <p className="mt-1 text-sm text-foreground/80">
+                It was created with no bounty per achiever, so even a verified
+                claim settles to zero USDC. We are not offering to join or
+                upload here - it would pass verification and pay you nothing.
+              </p>
+              <BrowsePoolsLink label="Find a pool that can pay" />
+            </section>
+          ) : unverifiableNow && !hasJoined ? (
             <section className="rounded-2xl border border-warning/40 bg-warning/10 p-5">
               <h2 className="text-lg font-semibold text-warning">
                 This goal cannot be verified right now
@@ -438,7 +450,7 @@ export default function PoolDetail({ id }: { id: string }) {
             </section>
           )}
 
-          {claimSection}
+          {poolCanPay(pool) ? claimSection : null}
 
           <section className="rounded-2xl border border-edge bg-surface p-5">
             <BackGoal poolId={pool.id} />
