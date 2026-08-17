@@ -53,6 +53,7 @@ import {
   isTransportError,
   withRetry,
 } from "@/lib/server/retry";
+import { verifySnpAttestation, type SnpBundle } from "@/lib/server/snp-attestation";
 
 /**
  * Read per call, not at module scope: a value captured at import time cannot be
@@ -95,20 +96,19 @@ interface VerdictSignature {
 }
 
 /**
- * Recompute the signed digest and recover the signer. Returns true only when
- * the signature is well-formed, binds THIS goalId, commits to THIS output, and
- * recovers to the expected enclave address. Any shape problem is a false, never
- * a throw - the caller treats false as "could not verify" and fails closed to a
- * retryable unavailable, so a rollout skew never permanently kills a claim.
+ * Recover the enclave signer from a verdict signature, confirming the signature
+ * is well-formed, binds THIS goalId, and commits to THIS output. Returns the
+ * recovered address, or null on any problem (never throws). The caller decides
+ * whether to TRUST that address (pinned, cached, or auto-repinned via a fresh
+ * attestation). goalId binding makes a captured signature non-replayable.
  */
-export async function verifyEnclaveVerdict(
+export async function recoverEnclaveSigner(
   goalId: string,
   output: string,
   signature: unknown,
-  expectedAddr: string,
-): Promise<boolean> {
+): Promise<Hex | null> {
   try {
-    if (signature === null || typeof signature !== "object") return false;
+    if (signature === null || typeof signature !== "object") return null;
     const sig = signature as VerdictSignature;
     if (
       typeof sig.signer !== "string" ||
@@ -118,12 +118,11 @@ export async function verifyEnclaveVerdict(
       typeof sig.verified !== "boolean" ||
       typeof sig.confidence !== "number"
     ) {
-      return false;
+      return null;
     }
-    if (sig.signer.toLowerCase() !== expectedAddr.toLowerCase()) return false;
-    if (sig.goal_id.toLowerCase() !== goalId.toLowerCase()) return false;
+    if (sig.goal_id.toLowerCase() !== goalId.toLowerCase()) return null;
     const ok = keccak256(toBytes(output));
-    if (sig.output_keccak.toLowerCase() !== ok.toLowerCase()) return false;
+    if (sig.output_keccak.toLowerCase() !== ok.toLowerCase()) return null;
     const digest = keccak256(
       encodeAbiParameters(
         [
@@ -139,8 +138,77 @@ export async function verifyEnclaveVerdict(
       hash: digest,
       signature: sig.sig as Hex,
     });
-    return recovered.toLowerCase() === expectedAddr.toLowerCase();
+    // The envelope's self-declared signer must match the recovered key.
+    if (recovered.toLowerCase() !== sig.signer.toLowerCase()) return null;
+    return recovered;
   } catch {
+    return null;
+  }
+}
+
+/**
+ * True when a verdict signature is valid AND recovers to expectedAddr. Retained
+ * for the pinned fast-path and its tests; auto-repin uses recoverEnclaveSigner
+ * plus a measurement gate (see acceptEnclaveSigner).
+ */
+export async function verifyEnclaveVerdict(
+  goalId: string,
+  output: string,
+  signature: unknown,
+  expectedAddr: string,
+): Promise<boolean> {
+  const recovered = await recoverEnclaveSigner(goalId, output, signature);
+  return recovered !== null && recovered.toLowerCase() === expectedAddr.toLowerCase();
+}
+
+/** Enclave signers proven this instance via a fresh, measurement-gated
+ *  attestation. Per-instance memory; a cold start re-verifies once. */
+const verifiedSigners = new Set<string>();
+
+function expectedMeasurement(): string {
+  return optionalEnv("CONFIDENTIAL_AI_EXPECTED_MEASUREMENT", "").trim().toLowerCase();
+}
+
+/**
+ * Auto-repin: fetch the shim's SEV-SNP attestation and accept `signer` only if
+ * a genuine AMD-signed report, matching our pinned code MEASUREMENT, commits to
+ * exactly that address. This is what lets the enclave rotate its key (a host
+ * migration) without a human re-pinning: trust is anchored on the measurement,
+ * not on one address. Verified signers are cached so this runs at most once per
+ * new key per instance.
+ */
+async function acceptEnclaveSigner(signer: Hex): Promise<boolean> {
+  const measurement = expectedMeasurement();
+  if (measurement === "") return false; // no measurement pinned -> cannot auto-repin
+  const apiKey = optionalEnv("CONFIDENTIAL_AI_API_KEY", "");
+  try {
+    const res = await fetch(`${attesterBaseUrl()}/v1/attestation`, {
+      method: "GET",
+      headers: apiKey === "" ? {} : { authorization: `Bearer ${apiKey}` },
+      signal: AbortSignal.timeout(attesterTimeoutMs()),
+    });
+    if (!res.ok) return false;
+    const bundle = (await res.json()) as unknown;
+    const result = verifySnpAttestation(bundle as SnpBundle, measurement);
+    if (
+      result.ok &&
+      result.signerAddress !== undefined &&
+      result.signerAddress.toLowerCase() === signer.toLowerCase()
+    ) {
+      verifiedSigners.add(signer.toLowerCase());
+      console.log(
+        `[attester] auto-repinned enclave signer ${signer} via measurement-gated attestation`,
+      );
+      return true;
+    }
+    console.error(
+      `[attester] attestation did not vouch for signer ${signer}: ${result.reason ?? "address mismatch"}`,
+    );
+    return false;
+  } catch (err) {
+    console.error(
+      `[attester] attestation fetch/verify failed for ${signer}: ${err instanceof Error ? err.message : String(err)}`,
+    );
     return false;
   }
 }
@@ -622,24 +690,29 @@ export async function pollInference(
   if (status === "completed") {
     const output = typeof payload.output === "string" ? payload.output : "";
 
-    // Tier C enforcement. When an enclave signer is pinned, the verdict must
-    // carry a signature that recovers to it and binds this goalId. A mismatch
-    // is treated as UNAVAILABLE (retryable), never a durable verdict: a rollout
-    // skew or a shim restart that rotated the key must not permanently fail a
-    // legitimate claim - it re-polls. Skipped entirely when unpinned or when no
-    // goalId is bound (e.g. the wearable path), preserving prior behavior.
-    const expected = expectedSigner();
-    if (expected !== "" && goalId !== undefined) {
-      const verified = await verifyEnclaveVerdict(
-        goalId,
-        output,
-        payload.signature,
-        expected,
-      );
-      if (!verified) {
+    // Tier C enforcement + auto-repin. The verdict must carry a signature that
+    // binds this goalId AND recovers to a TRUSTED enclave key. A key is trusted
+    // if it is the pinned address (fast path), was already auto-repinned this
+    // instance (cache), or a fresh SEV-SNP attestation matching our pinned code
+    // MEASUREMENT commits to it - which is what lets the enclave rotate its key
+    // (a host migration) with no human re-pin. Any failure is UNAVAILABLE
+    // (retryable), never a durable verdict, so a rollout skew or an in-flight
+    // rotation cannot permanently fail a legitimate claim. Enforcement runs only
+    // when an address or a measurement is pinned and a goalId is bound;
+    // otherwise prior behavior is preserved.
+    const pinnedSigner = expectedSigner();
+    const pinnedMeasurement = expectedMeasurement();
+    if (goalId !== undefined && (pinnedSigner !== "" || pinnedMeasurement !== "")) {
+      const signer = await recoverEnclaveSigner(goalId, output, payload.signature);
+      const trusted =
+        signer !== null &&
+        ((pinnedSigner !== "" && signer.toLowerCase() === pinnedSigner.toLowerCase()) ||
+          verifiedSigners.has(signer.toLowerCase()) ||
+          (await acceptEnclaveSigner(signer)));
+      if (!trusted) {
         const detail =
-          `attester verdict id=${attesterId} failed enclave signature ` +
-          `verification against pinned signer — refusing to trust`;
+          `attester verdict id=${attesterId} could not be verified against a ` +
+          `trusted enclave key — refusing to trust`;
         console.error(`[attester] ${detail} — treating as UNAVAILABLE (retryable)`);
         return { status: "unavailable", verdict: null, detail };
       }
