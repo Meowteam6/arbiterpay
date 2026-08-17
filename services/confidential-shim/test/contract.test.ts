@@ -33,6 +33,9 @@ function config(overrides: Partial<ShimConfig> = {}): ShimConfig {
     dataDir,
     port: 0,
     inferenceTimeoutMs: 5_000,
+    attestationMode: "software",
+    snpguestBin: "snpguest",
+    sevVmpl: 0,
     ...overrides,
   };
 }
@@ -357,13 +360,69 @@ describe("what the model receives", () => {
     expect(journal).not.toContain(secret);
     expect(journal).not.toContain(Buffer.from(secret).toString("base64"));
     const parsed = JSON.parse(journal) as Record<string, unknown>;
+    // signature is present (the enclave signs every completed verdict); goal_id
+    // is absent here because this submit bound no goalId. Still zero document data.
     expect(Object.keys(parsed).sort()).toEqual([
       "created_at",
       "id",
       "output",
+      "signature",
       "status",
       "updated_at",
     ]);
+  });
+});
+
+describe("GET /v1/attestation (Tier A)", () => {
+  it("requires the bearer token", async () => {
+    const res = await shim.app.request("/v1/attestation");
+    expect(res.status).toBe(401);
+  });
+
+  it("returns a software-mode bundle with no job or document data", async () => {
+    const res = await shim.app.request("/v1/attestation", {
+      headers: { authorization: `Bearer ${API_KEY}` },
+    });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as Record<string, unknown>;
+    expect(body.format).toBe("software");
+    expect(typeof body.report_data_hex).toBe("string");
+    // No inference/document surface leaks through the attestation path.
+    for (const forbidden of ["id", "output", "prompt", "resources", "error"]) {
+      expect(body[forbidden]).toBeUndefined();
+    }
+  });
+
+  it("commits report_data to the enclave signing key (address == report_data_hex[24:64])", async () => {
+    const res = await shim.app.request("/v1/attestation", {
+      headers: { authorization: `Bearer ${API_KEY}` },
+    });
+    const body = (await res.json()) as {
+      report_data_hex: string;
+      signing_address: string;
+    };
+    // last 32 bytes zero, address is the low 20 of the first-32 keccak commitment.
+    expect(body.report_data_hex.slice(64)).toBe("00".repeat(32));
+    expect(`0x${body.report_data_hex.slice(24, 64)}`.toLowerCase()).toBe(
+      body.signing_address.toLowerCase(),
+    );
+  });
+
+  it("returns 503 when the sev-snp producer fails", async () => {
+    const otherDir = fs.mkdtempSync(path.join(os.tmpdir(), "shim-att-"));
+    try {
+      const failing = createShim(
+        config({ attestationMode: "sev-snp", snpguestBin: "false", dataDir: otherDir }),
+      );
+      const res = await failing.app.request("/v1/attestation", {
+        headers: { authorization: `Bearer ${API_KEY}` },
+      });
+      expect(res.status).toBe(503);
+      const body = (await res.json()) as { error: string };
+      expect(body.error).toBe("attestation unavailable");
+    } finally {
+      fs.rmSync(otherDir, { recursive: true, force: true });
+    }
   });
 });
 

@@ -28,6 +28,17 @@ services:
       SHIM_API_KEY: ${SHIM_API_KEY:?set SHIM_API_KEY in .env}
       SHIM_DATA_DIR: /data/jobs
       PORT: 8080
+      # Attestation (Tier A). Default software so a non-SEV host still boots;
+      # set SHIM_ATTESTATION_MODE=sev-snp in .env on the Confidential VM.
+      SHIM_ATTESTATION_MODE: ${SHIM_ATTESTATION_MODE:-software}
+      SHIM_SEV_VMPL: ${SHIM_SEV_VMPL:-0}
+    # /dev/sev-guest passthrough so snpguest can request a hardware report. The
+    # host is an n2d SEV_SNP VM (ops/up.sh); the device is 0600 root:root, so
+    # the shim runs as root. Harmless on a non-SEV host only if the device
+    # exists; guard by leaving SHIM_ATTESTATION_MODE=software there.
+    devices:
+      - "/dev/sev-guest:/dev/sev-guest"
+    user: root
     volumes:
       - shim-data:/data
     depends_on:

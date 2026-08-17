@@ -17,6 +17,13 @@ export interface ShimConfig {
   port: number;
   /** Per-inference Ollama timeout. Generous: cold model loads are slow. */
   inferenceTimeoutMs: number;
+  /** Attestation backend. "sev-snp" on the Confidential VM, "software" for
+   *  tests and non-SEV local runs (returns a report_data commitment only). */
+  attestationMode: "sev-snp" | "software";
+  /** Path to the snpguest binary used in sev-snp mode. */
+  snpguestBin: string;
+  /** VMPL the attestation report is requested at. */
+  sevVmpl: number;
 }
 
 function trimmedEnv(
@@ -51,5 +58,11 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): ShimConfig {
     dataDir: trimmedEnv(env, "SHIM_DATA_DIR", "./data/jobs"),
     port,
     inferenceTimeoutMs: 10 * 60 * 1000,
+    attestationMode:
+      trimmedEnv(env, "SHIM_ATTESTATION_MODE", "software") === "sev-snp"
+        ? "sev-snp"
+        : "software",
+    snpguestBin: trimmedEnv(env, "SHIM_SNPGUEST_BIN", "snpguest"),
+    sevVmpl: Number.parseInt(trimmedEnv(env, "SHIM_SEV_VMPL", "0"), 10),
   };
 }

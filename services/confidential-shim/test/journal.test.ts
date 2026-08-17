@@ -94,6 +94,26 @@ describe("journal reload after restart", () => {
     expect(after.takePayload(job.id)).toBeUndefined();
   });
 
+  it("keeps a completed verdict's signature and goal_id across a restart", () => {
+    const before = new JobStore(dataDir);
+    const goalId = `0x${"ab".repeat(32)}`;
+    const job = before.create({ ...payload(), goalId });
+    before.takePayload(job.id);
+    before.markRunning(job.id);
+    const signature = JSON.stringify({ alg: "secp256k1-eth", v: 2, sig: "0xdead" });
+    before.complete(job.id, VERDICT, signature);
+
+    const after = new JobStore(dataDir);
+    const reloaded = after.get(job.id);
+    expect(reloaded?.status).toBe("completed");
+    expect(reloaded?.output).toBe(VERDICT);
+    expect(reloaded?.signature).toBe(signature);
+    expect(reloaded?.goal_id).toBe(goalId);
+    // document bytes still never touch the journal
+    const raw = fs.readFileSync(path.join(dataDir, `${job.id}.json`), "utf8");
+    expect(raw).not.toContain("flu shot administered");
+  });
+
   it("ignores corrupt and foreign files in the journal directory", () => {
     const before = new JobStore(dataDir);
     const job = before.create(payload());

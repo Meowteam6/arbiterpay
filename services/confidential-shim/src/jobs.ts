@@ -33,6 +33,10 @@ export interface JobPayload {
   systemPrompt: string;
   prompt: string;
   resources: JobResource[];
+  /** The claim's on-chain goalId (0x + 64 hex). Non-sensitive routing scalar,
+   *  folded into the verdict signature so a signature is not replayable across
+   *  claims. Optional: a caller that does not bind a goal signs against zeros. */
+  goalId?: string;
 }
 
 /** Journaled job metadata. This is the full set of persisted fields. */
@@ -44,6 +48,10 @@ export interface JobMeta {
   /** Model output on completion: the strict-JSON verdict text. */
   output?: string;
   error?: string;
+  /** The claim's goalId, persisted for provenance. Non-sensitive. */
+  goal_id?: string;
+  /** JSON-stringified SignatureEnvelope over the completed verdict. */
+  signature?: string;
 }
 
 const JOURNAL_FILE = /^[0-9a-f-]{36}\.json$/;
@@ -101,6 +109,10 @@ export class JobStore {
             : new Date().toISOString(),
         ...(typeof record.output === "string" ? { output: record.output } : {}),
         ...(typeof record.error === "string" ? { error: record.error } : {}),
+        ...(typeof record.goal_id === "string" ? { goal_id: record.goal_id } : {}),
+        ...(typeof record.signature === "string"
+          ? { signature: record.signature }
+          : {}),
       };
       if (TERMINAL_STATUSES.includes(meta.status) === false) {
         meta.status = "failed";
@@ -128,6 +140,7 @@ export class JobStore {
       status: "queued",
       created_at: now,
       updated_at: now,
+      ...(payload.goalId !== undefined ? { goal_id: payload.goalId } : {}),
     };
     this.meta.set(meta.id, meta);
     this.payloads.set(meta.id, payload);
@@ -154,8 +167,8 @@ export class JobStore {
     this.transition(id, { status: "running" });
   }
 
-  complete(id: string, output: string): void {
-    this.transition(id, { status: "completed", output });
+  complete(id: string, output: string, signature?: string): void {
+    this.transition(id, { status: "completed", output, signature });
   }
 
   fail(id: string, error: string): void {
@@ -165,13 +178,19 @@ export class JobStore {
 
   private transition(
     id: string,
-    change: { status: JobStatus; output?: string; error?: string },
+    change: {
+      status: JobStatus;
+      output?: string;
+      error?: string;
+      signature?: string;
+    },
   ): void {
     const meta = this.meta.get(id);
     if (meta === undefined) return;
     meta.status = change.status;
     if (change.output !== undefined) meta.output = change.output;
     if (change.error !== undefined) meta.error = change.error;
+    if (change.signature !== undefined) meta.signature = change.signature;
     meta.updated_at = new Date().toISOString();
     this.writeJournal(meta);
   }

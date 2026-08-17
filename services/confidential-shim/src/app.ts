@@ -8,7 +8,9 @@
 // Clients ask for model "gemma4" (the attester's name); the shim serves it
 // with the local Ollama model from SHIM_MODEL.
 
+import * as os from "node:os";
 import { Hono } from "hono";
+import { produceAttestation, type AttestationDeps } from "./attestation.js";
 import { bearerMatches } from "./auth.js";
 import type { ShimConfig } from "./config.js";
 import { runInference } from "./inference.js";
@@ -18,7 +20,11 @@ import {
   type SupportedContentType,
 } from "./jobs.js";
 import { checkModel } from "./ollama.js";
+import { bootEthSigner, type VerdictSigner } from "./signing.js";
 import { InferenceWorker, type InferenceRunner } from "./worker.js";
+
+/** goalId a caller may bind a verdict to: 0x + 64 hex. */
+const GOAL_ID_RE = /^0x[0-9a-fA-F]{64}$/;
 
 /** The model id the attester contract exposes; requests for anything else 400. */
 export const PUBLIC_MODEL_ID = "gemma4";
@@ -47,13 +53,28 @@ export interface Shim {
  * Build the shim. `runner` is injectable for tests; production uses the real
  * Ollama-backed runInference.
  */
-export function createShim(config: ShimConfig, runner?: InferenceRunner): Shim {
+export function createShim(
+  config: ShimConfig,
+  runner?: InferenceRunner,
+  signerOverride?: VerdictSigner,
+): Shim {
   const store = new JobStore(config.dataDir);
+  // Boot the enclave signing key once at startup. Ephemeral, in memory only,
+  // never written to /data. Injectable for deterministic tests.
+  const signer = signerOverride ?? bootEthSigner();
   const worker = new InferenceWorker(
     store,
     runner ?? ((payload) => runInference(config, payload)),
+    signer,
   );
   const app = new Hono();
+
+  const attDeps: AttestationDeps = {
+    mode: config.attestationMode,
+    snpguestBin: config.snpguestBin,
+    vmpl: config.sevVmpl,
+    runtimeDir: os.tmpdir(),
+  };
 
   // Health is unauthenticated so load balancers and demo-morning checklists
   // can probe it. It reports reachability and model presence, never job data.
@@ -79,6 +100,22 @@ export function createShim(config: ShimConfig, runner?: InferenceRunner): Shim {
   });
 
   app.get("/v1/models", (c) => c.json({ models: [{ id: PUBLIC_MODEL_ID }] }));
+
+  // Tier A/B: hardware attestation, bound to the enclave signing key. The
+  // report's REPORT_DATA commits to keccak256(pubkey), so a valid AMD-signed
+  // report proves this signing key lives inside the measured enclave. The
+  // address is report_data_hex[24:64]. Carries zero job/document data. 503 if
+  // the producer fails - never a fabricated report.
+  app.get("/v1/attestation", async (c) => {
+    try {
+      const bundle = await produceAttestation(attDeps, signer.reportData());
+      return c.json({ ...bundle, signing_address: signer.address() });
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      console.error(`[shim] attestation failed: ${message}`);
+      return c.json({ error: "attestation unavailable" }, 503);
+    }
+  });
 
   app.post("/v1/inference", async (c) => {
     const declaredLength = Number.parseInt(
@@ -119,6 +156,12 @@ export function createShim(config: ShimConfig, runner?: InferenceRunner): Shim {
       typeof body.system_prompt !== "string"
     ) {
       return c.json({ error: "system_prompt must be a string" }, 400);
+    }
+    if (
+      body.goal_id !== undefined &&
+      (typeof body.goal_id !== "string" || GOAL_ID_RE.test(body.goal_id) === false)
+    ) {
+      return c.json({ error: "goal_id must be 0x followed by 64 hex chars" }, 400);
     }
 
     const resources: JobResource[] = [];
@@ -169,6 +212,7 @@ export function createShim(config: ShimConfig, runner?: InferenceRunner): Shim {
       systemPrompt: typeof body.system_prompt === "string" ? body.system_prompt : "",
       prompt: body.prompt,
       resources,
+      ...(typeof body.goal_id === "string" ? { goalId: body.goal_id } : {}),
     });
     worker.enqueue(meta.id);
     // Log only metadata, never document bytes or prompt text.
@@ -188,6 +232,9 @@ export function createShim(config: ShimConfig, runner?: InferenceRunner): Shim {
       status: meta.status,
       ...(meta.output !== undefined ? { output: meta.output } : {}),
       ...(meta.error !== undefined ? { error: meta.error } : {}),
+      ...(meta.signature !== undefined
+        ? { signature: JSON.parse(meta.signature) as unknown }
+        : {}),
     });
   });
 

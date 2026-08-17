@@ -19,6 +19,44 @@ export const VERDICT_SCHEMA = {
   required: ["verified", "confidence", "reason"],
 } as const;
 
+/** The signed scalars extracted from a verdict output string. */
+export interface VerdictScalars {
+  verified: boolean;
+  /** 0 low, 1 medium, 2 high. */
+  confidence: 0 | 1 | 2;
+}
+
+const CONFIDENCE_RANK: Record<string, 0 | 1 | 2> = {
+  low: 0,
+  medium: 1,
+  high: 2,
+};
+
+/**
+ * Extract (verified, confidence) from a verdict output string for signing.
+ * Fails safe: any parse problem, or a non-`true` `verified`, yields
+ * {verified:false, confidence:0}. A garbled or non-JSON output can therefore
+ * never be signed as a passing verdict. Confidence defaults to low (0) unless
+ * it is exactly "medium" or "high".
+ */
+export function parseVerdictScalars(output: string): VerdictScalars {
+  try {
+    const parsed: unknown = JSON.parse(output);
+    if (parsed === null || typeof parsed !== "object") {
+      return { verified: false, confidence: 0 };
+    }
+    const record = parsed as Record<string, unknown>;
+    const verified = record.verified === true;
+    const confidence =
+      typeof record.confidence === "string"
+        ? CONFIDENCE_RANK[record.confidence] ?? 0
+        : 0;
+    return { verified, confidence };
+  } catch {
+    return { verified: false, confidence: 0 };
+  }
+}
+
 export interface ChatVerdictArgs {
   ollamaUrl: string;
   model: string;
