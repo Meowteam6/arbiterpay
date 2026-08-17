@@ -309,7 +309,11 @@ export async function POST(request: Request, ctx: Ctx) {
           "That verification job does not belong to this claim. Upload the record for this pool again.",
         );
       }
-      poll = pollInference;
+      // Bind the path goalId (which equals the on-chain computeGoalId) into the
+      // poll so the Tier C enclave-signature check verifies the verdict was
+      // signed for THIS claim. No injectable-signature change: the closure
+      // carries goalId, the rest of the run loop is untouched.
+      poll = (aid, spec) => pollInference(aid, spec, goalId);
     }
 
     // Ownership for the RESPONSE only, never for the run. The derived-goalId

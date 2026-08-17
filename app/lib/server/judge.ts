@@ -40,6 +40,13 @@
 // Fail-closed is unchanged and non-negotiable: no failure mode of this module
 // may ever produce verified=true unless DEMO_MODE is explicitly on.
 
+import {
+  encodeAbiParameters,
+  keccak256,
+  recoverAddress,
+  toBytes,
+  type Hex,
+} from "viem";
 import { optionalEnv } from "@/lib/server/env";
 import {
   isRetryableStatus,
@@ -57,6 +64,85 @@ function attesterBaseUrl(): string {
     "CONFIDENTIAL_AI_BASE_URL",
     "https://confidential-ai-dev-preview.cldev.cloud",
   );
+}
+
+/**
+ * Tier C enforcement: the enclave's pinned Ethereum address. When set, every
+ * completed verdict must carry a signature that recovers to it, bound to the
+ * same goalId. Pinned once, after the offline attestation gate confirms the
+ * address is committed by a genuine SEV-SNP report (verifier/pin-signer). When
+ * empty, verification is skipped and the poll behaves exactly as before - the
+ * safe default so a deploy is never wedged waiting on a pin.
+ */
+function expectedSigner(): string {
+  return optionalEnv("CONFIDENTIAL_AI_EXPECTED_SIGNER", "").trim();
+}
+
+/**
+ * The signature envelope the shim returns alongside a completed verdict.
+ * secp256k1 over keccak256(abi.encode(goalId, verified, confidence,
+ * keccak256(output))). goalId is folded in so a captured signature is not
+ * replayable onto another claim.
+ */
+interface VerdictSignature {
+  alg?: unknown;
+  signer?: unknown;
+  goal_id?: unknown;
+  verified?: unknown;
+  confidence?: unknown;
+  output_keccak?: unknown;
+  sig?: unknown;
+}
+
+/**
+ * Recompute the signed digest and recover the signer. Returns true only when
+ * the signature is well-formed, binds THIS goalId, commits to THIS output, and
+ * recovers to the expected enclave address. Any shape problem is a false, never
+ * a throw - the caller treats false as "could not verify" and fails closed to a
+ * retryable unavailable, so a rollout skew never permanently kills a claim.
+ */
+export async function verifyEnclaveVerdict(
+  goalId: string,
+  output: string,
+  signature: unknown,
+  expectedAddr: string,
+): Promise<boolean> {
+  try {
+    if (signature === null || typeof signature !== "object") return false;
+    const sig = signature as VerdictSignature;
+    if (
+      typeof sig.signer !== "string" ||
+      typeof sig.goal_id !== "string" ||
+      typeof sig.output_keccak !== "string" ||
+      typeof sig.sig !== "string" ||
+      typeof sig.verified !== "boolean" ||
+      typeof sig.confidence !== "number"
+    ) {
+      return false;
+    }
+    if (sig.signer.toLowerCase() !== expectedAddr.toLowerCase()) return false;
+    if (sig.goal_id.toLowerCase() !== goalId.toLowerCase()) return false;
+    const ok = keccak256(toBytes(output));
+    if (sig.output_keccak.toLowerCase() !== ok.toLowerCase()) return false;
+    const digest = keccak256(
+      encodeAbiParameters(
+        [
+          { type: "bytes32" },
+          { type: "bool" },
+          { type: "uint8" },
+          { type: "bytes32" },
+        ],
+        [sig.goal_id as Hex, sig.verified, sig.confidence, ok],
+      ),
+    );
+    const recovered = await recoverAddress({
+      hash: digest,
+      signature: sig.sig as Hex,
+    });
+    return recovered.toLowerCase() === expectedAddr.toLowerCase();
+  } catch {
+    return false;
+  }
 }
 const ATTESTER_MODEL = "gemma4";
 
@@ -271,6 +357,7 @@ export async function submitInference(
   fileBase64: string,
   fileName: string,
   contentType: SupportedContentType,
+  goalId?: string,
 ): Promise<string> {
   const apiKey = optionalEnv("CONFIDENTIAL_AI_API_KEY", "");
   if (apiKey === "") {
@@ -301,6 +388,9 @@ export async function submitInference(
     system_prompt: SYSTEM_PROMPT,
     prompt: userPrompt(goalSpec, fileName),
     resources: [resource],
+    // Bind the enclave's verdict signature to this claim's goalId (Tier C).
+    // The shim signs over it; the poll step verifies the binding.
+    ...(goalId !== undefined ? { goal_id: goalId } : {}),
   };
 
   let res: Response;
@@ -412,6 +502,7 @@ export interface PollResult {
 export async function pollInference(
   attesterId: string,
   goalSpec: string,
+  goalId?: string,
 ): Promise<PollResult> {
   if (isFailId(attesterId)) {
     return {
@@ -516,7 +607,7 @@ export async function pollInference(
     };
   }
 
-  let payload: { status?: unknown; output?: unknown };
+  let payload: { status?: unknown; output?: unknown; signature?: unknown };
   try {
     payload = (await res.json()) as typeof payload;
   } catch (err) {
@@ -530,6 +621,30 @@ export async function pollInference(
 
   if (status === "completed") {
     const output = typeof payload.output === "string" ? payload.output : "";
+
+    // Tier C enforcement. When an enclave signer is pinned, the verdict must
+    // carry a signature that recovers to it and binds this goalId. A mismatch
+    // is treated as UNAVAILABLE (retryable), never a durable verdict: a rollout
+    // skew or a shim restart that rotated the key must not permanently fail a
+    // legitimate claim - it re-polls. Skipped entirely when unpinned or when no
+    // goalId is bound (e.g. the wearable path), preserving prior behavior.
+    const expected = expectedSigner();
+    if (expected !== "" && goalId !== undefined) {
+      const verified = await verifyEnclaveVerdict(
+        goalId,
+        output,
+        payload.signature,
+        expected,
+      );
+      if (!verified) {
+        const detail =
+          `attester verdict id=${attesterId} failed enclave signature ` +
+          `verification against pinned signer — refusing to trust`;
+        console.error(`[attester] ${detail} — treating as UNAVAILABLE (retryable)`);
+        return { status: "unavailable", verdict: null, detail };
+      }
+    }
+
     const verdict = parseVerdict(output);
     console.log(
       `[attester] verdict id=${attesterId} verified=${verdict.verified} confidence=${verdict.confidence}`,

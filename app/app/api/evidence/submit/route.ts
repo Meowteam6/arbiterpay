@@ -71,6 +71,7 @@ import {
   safeError,
 } from "@/lib/server/http";
 import { participantJoined } from "@/lib/server/pools";
+import { computeGoalId } from "@/lib/server/verdict";
 
 export async function POST(request: Request) {
   const cid = newCorrelationId("evidence-submit");
@@ -148,6 +149,20 @@ export async function POST(request: Request) {
     // untrusted, and a stranger must not be able to write lines into the log.
     goalSpecDiffers("evidence-submit", body.goalSpec, pool.goalSpec);
 
+    // Bind the enclave signature to this claim's goalId (Tier C). Derived from
+    // the contract, the single source of truth, so it matches the run route's
+    // path goalId exactly. A read failure here is non-fatal: pass undefined and
+    // the shim signs against the zero goal (verification is skipped unless a
+    // signer is pinned AND a goalId is bound).
+    let goalId: string | undefined;
+    try {
+      goalId = await computeGoalId(BigInt(poolId), address as Address);
+    } catch (err) {
+      console.warn(
+        `[${cid}] could not derive goalId for the enclave signature binding: ${errorMessage(err)}`,
+      );
+    }
+
     // submitInference never throws: on a missing key or attester error it
     // returns a fail id (or, with DEMO_MODE on, a mock id) and logs loudly.
     const attesterId = await submitInference(
@@ -155,6 +170,7 @@ export async function POST(request: Request) {
       fileBase64,
       serverEvidenceFileName(contentType as SupportedContentType),
       contentType as SupportedContentType,
+      goalId,
     );
 
     // The job belongs to this claim and no other. Written before the id is

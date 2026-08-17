@@ -10,7 +10,12 @@
 // — that is the CRE / onReport path (Tier 2). canSettle ignores the digest; it
 // gates only on verified + confidence. No raw health data is hashed or stored.
 
-import { keccak256, stringToBytes, type Address, type Hex } from "viem";
+import {
+  encodeAbiParameters,
+  keccak256,
+  type Address,
+  type Hex,
+} from "viem";
 import { privateKeyToAccount } from "viem/accounts";
 import {
   arcPublicClient,
@@ -62,6 +67,29 @@ export const VERDICT_FACETS = {
 } as const;
 
 const CONFIDENCE_U8: Record<Confidence, number> = { low: 0, medium: 1, high: 2 };
+
+/**
+ * The on-chain provenance digest (Tier C): keccak256 over ONLY public routing
+ * scalars the contract already stores in plaintext (goalId, verified,
+ * confidence). It commits nothing derived from the health document — no output
+ * prose, no transcript hash — so the permanent public ledger cannot become an
+ * unsalted commitment to health-derived content. A third party recomputes this
+ * exact value to tie an on-chain record to a goal (verify-chain). The enclave's
+ * off-chain signature separately binds the full transcript via keccak256(output);
+ * that hash stays off-chain, where the output already appears.
+ */
+export function verdictDigest(
+  goalId: Hex,
+  verified: boolean,
+  confidence: Confidence,
+): Hex {
+  return keccak256(
+    encodeAbiParameters(
+      [{ type: "bytes32" }, { type: "bool" }, { type: "uint8" }],
+      [goalId, verified, CONFIDENCE_U8[confidence]],
+    ),
+  );
+}
 
 /** Attempts for a chain call before giving up and surfacing the failure. */
 const RECORD_ATTEMPTS = 3;
@@ -202,7 +230,9 @@ export async function recordVerdict(
   // A failure here throws to the caller, which surfaces it. The frontend re-polls,
   // so a transient read failure self-heals on the next poll.
   const goalId = await computeGoalId(poolId, user);
-  const digest = keccak256(stringToBytes(attesterId)); // advisory content hash
+  // Tier C: commit only to public routing scalars, never the attester id or
+  // any health-derived content. Recomputable by any third-party verifier.
+  const digest = verdictDigest(goalId, verified, confidence);
   const account = oracleAccount();
   const wallet = arcWalletClient(account);
   const publicClient = arcPublicClient();
