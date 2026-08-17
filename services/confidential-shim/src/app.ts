@@ -20,6 +20,7 @@ import {
   type SupportedContentType,
 } from "./jobs.js";
 import { checkModel } from "./ollama.js";
+import { resolveEnclaveKey } from "./sealing.js";
 import { bootEthSigner, type VerdictSigner } from "./signing.js";
 import { InferenceWorker, type InferenceRunner } from "./worker.js";
 
@@ -59,9 +60,11 @@ export function createShim(
   signerOverride?: VerdictSigner,
 ): Shim {
   const store = new JobStore(config.dataDir);
-  // Boot the enclave signing key once at startup. Ephemeral, in memory only,
-  // never written to /data. Injectable for deterministic tests.
-  const signer = signerOverride ?? bootEthSigner();
+  // Boot the enclave signing key. In sev-snp mode the key is SEALED to /data
+  // with a measurement-bound firmware key, so it survives restarts and the
+  // address stays stable (see sealing.ts). In software mode it is ephemeral.
+  // Injectable for deterministic tests.
+  const signer = signerOverride ?? bootEthSigner(resolveEnclaveKey(config));
   const worker = new InferenceWorker(
     store,
     runner ?? ((payload) => runInference(config, payload)),

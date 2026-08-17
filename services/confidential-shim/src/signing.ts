@@ -99,9 +99,11 @@ function pubKey64(publicKey: Hex): Buffer {
   return Buffer.from(hex.slice(2), "hex");
 }
 
-/** Boot an ephemeral in-memory enclave signer. */
-export function bootEthSigner(): VerdictSigner {
-  const privateKey = generatePrivateKey();
+/**
+ * Boot the enclave signer. Pass a resolved private key (see sealing.ts) to make
+ * the address stable across restarts; omit it for an ephemeral in-memory key.
+ */
+export function bootEthSigner(privateKey: Hex = generatePrivateKey()): VerdictSigner {
   const account = privateKeyToAccount(privateKey);
   const keyBody = pubKey64(account.publicKey);
   const commitment = Buffer.from(keccak256(keyBody).slice(2), "hex"); // 32 bytes
