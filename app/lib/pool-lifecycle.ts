@@ -26,6 +26,33 @@ export function poolPhase(
   return pool.periodEnd > nowSeconds ? "live" : "expired";
 }
 
+/** The minimal pool shape the payability check depends on. */
+export interface PayabilityFields {
+  entryFee: bigint;
+  bountyModel: number;
+}
+
+/**
+ * Whether a pool can pay an achiever at all.
+ *
+ * HealthPools._payAchievers under bountyModel 0 (fixed bounty) derives every
+ * payout from entryFee: `totalOwed += entryFee * multiplierBps / BPS`, and
+ * returns early when totalOwed is zero. So a pool created with bountyModel 0
+ * AND entryFee 0 settles to nobody no matter how much USDC is in it - the
+ * settle transaction succeeds, AchieverPaid never fires, and the participant
+ * is paid nothing. Funding it does not help; entryFee is write-once in
+ * createPool, so such a pool can never be repaired.
+ *
+ * bountyModel 1 splits the pot pro-rata and is unaffected by entryFee.
+ *
+ * Callers hide these from the joinable list. This is a predicate rather than
+ * a list of pool ids on purpose: it also catches any future pool seeded the
+ * same way.
+ */
+export function poolCanPay(pool: PayabilityFields): boolean {
+  return pool.bountyModel !== 0 || pool.entryFee > 0n;
+}
+
 export interface GroupedPools<T> {
   live: T[];
   expired: T[];

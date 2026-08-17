@@ -16,12 +16,19 @@ export const arcTestnet = defineChain({
   // Order matters: viem's fallback transport tries these in sequence, so the
   // first entry is what a browser actually talks to on a healthy request.
   //
-  // blockdaemon leads because it is the only endpoint that answers a browser
-  // cleanly. rpc.testnet.arc.network sends no Access-Control-Allow-Origin, so
-  // calling it from the app's origin fails CORS preflight and floods the
-  // console on every pool page; it stays last because it is still a valid
-  // server-side fallback (no CORS server-side) and it also rate-limits under
-  // load. rpc.drpc.testnet.arc.network is dropped outright: it answers 400.
+  // blockdaemon leads, but NOT for the reason originally recorded here. The
+  // old comment claimed rpc.testnet.arc.network sends no
+  // Access-Control-Allow-Origin and that rpc.drpc.testnet.arc.network answers
+  // 400. Re-measured 2026-08-16 with fetch() from the production origin
+  // (https://gohealthme-circle.vercel.app): all three answer 200 with the
+  // correct chainId and no CORS failure, and rpc.testnet.arc.network was
+  // actually the fastest of the three. Whatever was broken has been fixed
+  // upstream.
+  //
+  // The order is kept as-is because it works and is deployed, not because the
+  // other endpoints are broken. If you are here to "fix" an RPC problem,
+  // measure from a browser origin first - curl ignores CORS, so a 200 from
+  // the shell proves nothing either way.
   rpcUrls: {
     default: {
       http: [

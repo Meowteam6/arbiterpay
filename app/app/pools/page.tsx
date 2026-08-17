@@ -28,7 +28,11 @@ import {
   TAP_TARGET,
 } from "@/components/ui";
 import { fetchParticipants, fetchPools, type PoolInfo } from "@/lib/contract";
-import { groupPoolsByPhase, type PoolPhase } from "@/lib/pool-lifecycle";
+import {
+  groupPoolsByPhase,
+  poolCanPay,
+  type PoolPhase,
+} from "@/lib/pool-lifecycle";
 import {
   splitByVerifiability,
   splitExpiredPools,
@@ -70,7 +74,13 @@ export default function PoolsPage() {
 
   const grouped = useMemo(() => {
     if (poolsQuery.data === undefined) return null;
-    return groupPoolsByPhase(poolsQuery.data.pools, poolsQuery.data.asOfSeconds);
+    // Drop pools that structurally cannot pay before grouping, so they never
+    // reach the joinable list. Two such pools were live and sorted to the top
+    // of the page advertising the largest bounties on it, which is the worst
+    // possible thing to hand a first-time visitor: they would join, upload,
+    // verify, and be paid nothing by a transaction that succeeds.
+    const payable = poolsQuery.data.pools.filter(poolCanPay);
+    return groupPoolsByPhase(payable, poolsQuery.data.asOfSeconds);
   }, [poolsQuery.data]);
 
   // Only expired pools need a head count: it is what separates "settlement
