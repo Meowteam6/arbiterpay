@@ -16,12 +16,12 @@ export default function PayoutMoment({
   txHash: string | null;
 }) {
   return (
-    <div className="rounded-2xl border border-accent/40 bg-accent-deep/40 p-6 text-center">
-      <Stamp>Paid</Stamp>
+    <div className="rounded-2xl border border-gold/40 bg-gold-deep/30 p-6 text-center">
+      <Stamp tone="gold">Paid</Stamp>
       <p className="mt-4">
-        <Money usd={paidUsd} sign="+" size="xl" />
+        <Money usd={paidUsd} tone="gold" sign="+" size="xl" />
       </p>
-      <p className="mt-2 text-base font-semibold text-accent">
+      <p className="mt-2 text-base font-semibold text-gold">
         SPOTTER paid you.
       </p>
       <p className="mt-1 text-sm text-muted">Absolute unit. Run it back.</p>

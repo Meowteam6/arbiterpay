@@ -12,10 +12,13 @@
   --accent-deep: #064e3b;
   --danger: #f87171;
   --warning: #fbbf24;
-  /* The single warm accent, reserved for money in motion: USDC amounts only.
-     Emerald stays the trust/verdict color; gold never labels anything but a
-     dollar figure. */
-  --gold: #f5b942;
+  /* Warm accent, reserved STRICTLY for money in motion: a payout landing or
+     the agent's live spend. Never used for a static balance or a verdict -
+     emerald owns trust, gold owns movement. Kept clear of the yellow warning
+     tone so a payout never reads as an alert. */
+  --gold: #f3b13c;
+  --gold-strong: #eaa11f;
+  --gold-deep: #3a2a09;
 }
 
 @theme inline {
@@ -31,6 +34,8 @@
   --color-danger: var(--danger);
   --color-warning: var(--warning);
   --color-gold: var(--gold);
+  --color-gold-strong: var(--gold-strong);
+  --color-gold-deep: var(--gold-deep);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
