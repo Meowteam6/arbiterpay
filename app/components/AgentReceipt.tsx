@@ -300,7 +300,18 @@ function ErrorRow({
   );
 }
 
-export default function AgentReceipt({ ledger }: { ledger: LedgerEntry[] }) {
+export default function AgentReceipt({
+  ledger,
+  evidenceKind = "document",
+}: {
+  ledger: LedgerEntry[];
+  /** Which evidence path this receipt belongs to. Defaults to "document" so
+   *  every existing caller is unchanged; the wearable path opts in so the
+   *  privacy footer tells the truth. Only the document path runs inside the
+   *  confidential enclave (lib/server/judge.ts); the wearable path reads the
+   *  Junction summary on SPOTTER's own server, so it must not claim otherwise. */
+  evidenceKind?: "document" | "wearable";
+}) {
   const receipt = projectReceipt(ledger);
   const items = collapseErrors(receipt.rows);
   const deferredEntry = ledger.find(
@@ -412,8 +423,9 @@ export default function AgentReceipt({ ledger }: { ledger: LedgerEntry[] }) {
         </p>
       ) : null}
       <p className="mt-2 text-xs text-muted">
-        Your document never left the secure enclave. SPOTTER only ever saw the
-        verdict.
+        {evidenceKind === "wearable"
+          ? "Your wearable data stayed server-side and was never written on-chain. Only the verdict was recorded."
+          : "Your document never left the secure enclave. SPOTTER only ever saw the verdict."}
       </p>
     </div>
   );

@@ -438,8 +438,9 @@ function WearableCheckInner({
       <div className="space-y-3">
         <h3 className="text-lg font-semibold">Handing it to SPOTTER</h3>
         <p className="text-sm text-muted">
-          SPOTTER is pulling your wearable summary inside the confidential
-          enclave. Only the verdict comes back out.
+          SPOTTER is reading your synced wearable summary on its server and
+          checking it against the goal. Your raw health data stays server-side
+          and never goes on-chain - only the pass or fail verdict does.
         </p>
       </div>
     );
@@ -456,7 +457,7 @@ function WearableCheckInner({
   ) {
     return (
       <div className="space-y-4">
-        <AgentReceipt ledger={status.ledger} />
+        <AgentReceipt ledger={status.ledger} evidenceKind="wearable" />
         <ErrorNote
           title="Lost contact with SPOTTER"
           detail={`${status.message} The receipt above is what already happened and nothing in it is lost.`}
@@ -517,7 +518,7 @@ function WearableCheckInner({
           />
         ) : null}
 
-        <AgentReceipt ledger={status.ledger} />
+        <AgentReceipt ledger={status.ledger} evidenceKind="wearable" />
 
         {/* The run keeps going without a signature; only the rows are held
          *  back. Saying so beats a receipt that silently stops printing. */}
@@ -677,9 +678,23 @@ function WearableCheckInner({
       <p className="text-sm text-muted">
         {readableGoal === ""
           ? "SPOTTER reads your synced wearable summary and pays if the data shows the goal."
-          : `SPOTTER reads your synced wearable summary and pays if the data shows "${readableGoal}".`}{" "}
-        The check runs in a confidential enclave - your raw health data never
-        touches the chain or SPOTTER itself, only the verdict does.
+          : `SPOTTER reads your synced wearable summary and pays if the data shows "${readableGoal}".`}
+      </p>
+
+      {/* Privacy line, scoped honestly to the wearable path. The document path
+       *  runs inside the confidential enclave (lib/server/judge.ts); the
+       *  wearable path does NOT - SPOTTER reads the Junction summary on its
+       *  own server (lib/server/junction.ts + lib/server/agent/wearable.ts)
+       *  and derives the verdict there. Raw samples never leave that server
+       *  boundary and nothing but the pass/fail verdict and its confidence is
+       *  written on-chain, but claiming a sealed enclave here would be a lie:
+       *  the wearable summary transits the server. Say what is true. */}
+      <p className="rounded-xl border border-edge bg-surface-raised p-3 text-xs text-muted">
+        Where your wearable data goes: SPOTTER reads your synced summary on its
+        server to check the goal. That is the wearable path - not the sealed
+        enclave the document path runs in. Your raw health data stays
+        server-side, is never written on-chain, and is never shared. Only the
+        verdict - pass or fail, with its confidence - is recorded on-chain.
       </p>
 
       {!authenticated || address === null ? (
@@ -812,7 +827,7 @@ function WearableCheckInner({
       {status.kind === "error" ? (
         <div className="space-y-3">
           {status.ledger !== undefined && status.ledger.length > 0 ? (
-            <AgentReceipt ledger={status.ledger} />
+            <AgentReceipt ledger={status.ledger} evidenceKind="wearable" />
           ) : null}
           <ErrorNote
             title="Could not run the check"
