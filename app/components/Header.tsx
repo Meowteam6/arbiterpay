@@ -14,6 +14,7 @@ import { CopyAddressButton } from "@/components/FundingHelp";
 const NAV_ITEMS: { href: string; label: string }[] = [
   { href: "/pools", label: "Pools" },
   { href: "/agent", label: "SPOTTER" },
+  { href: "/sponsor", label: "Sponsor" },
   { href: "/dashboard", label: "Dashboard" },
 ];
 
