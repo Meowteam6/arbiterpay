@@ -9,14 +9,22 @@ import BackGoal from "@/components/BackGoal";
 import FundPool from "@/components/FundPool";
 import EvidenceUpload from "@/components/EvidenceUpload";
 import WearableCheck from "@/components/WearableCheck";
-import { Badge, ErrorNote, Skeleton, Stat, TAP_TARGET } from "@/components/ui";
+import ClaimRail, { type ClaimRailState, type VerdictKind } from "@/components/ClaimRail";
+import { Badge, ErrorNote, Money, Skeleton, Stat, TAP_TARGET } from "@/components/ui";
 import { arcAddressUrl } from "@/lib/chains";
 import {
   AGENT_WALLET_QUERY_KEY,
   agentIsBroke,
   fetchAgentWallet,
 } from "@/lib/agent-budget";
-import type { LedgerEntry } from "@/lib/agent-receipt";
+import {
+  projectReceipt,
+  runStatusFromLedger,
+  toUsd2,
+  type LedgerEntry,
+  type RunStatus,
+} from "@/lib/agent-receipt";
+import { claimStepOf } from "@/lib/claim-rail";
 import { fetchWithWalletAuth } from "@/lib/client-auth";
 import { useWalletAuth } from "@/lib/useWalletAuth";
 import { claimProofPathOf, type ProofPath } from "@/lib/claim-restore";
@@ -57,6 +65,14 @@ function BrowsePoolsLink({ label = "Browse live pools" }: { label?: string }) {
       {label}
     </Link>
   );
+}
+
+/** The claim ledger, read owner-only and cachedOnly (never prompts): it drives
+ *  the claim rail's progress and the restored proof path. hasLedger tells a
+ *  withheld claim (a claim exists, signature not cached) apart from no claim. */
+interface ClaimLedgerData {
+  ledger: LedgerEntry[] | null;
+  hasLedger: boolean;
 }
 
 export default function PoolDetail({ id }: { id: string }) {
@@ -152,22 +168,20 @@ export default function PoolDetail({ id }: { id: string }) {
     poolQuery.data !== undefined &&
     evidenceTypeOf(poolQuery.data.pool.goalSpec) === "wearable";
   const joined = participantQuery.data?.joined === true;
+  const canPay =
+    poolQuery.data !== undefined && poolCanPay(poolQuery.data.pool);
 
-  // Which tab owns an existing claim. Only wearable pools have two tabs, so
-  // this is the only case where the answer can be wrong; the ledger is read
-  // once and the claim section waits for it rather than mounting the wrong
-  // path first and swapping it out from under a running restore.
-  //
-  // The read is owner-only, so it carries the wallet signature - but
-  // cachedOnly, exactly like providerQuery above. Opening a pool page is not a
-  // request to unlock anything, and this query gates the claim section behind
-  // a skeleton, so a prompting read here would be the first thing that happens
-  // on load for anyone who joined a wearable pool. Without a signature the
-  // server returns no entries, the path is unknown, and the default tab stands
-  // - the claim client itself then prompts and says why.
-  const claimPathQuery = useQuery({
-    queryKey: ["claim-proof-path", id, address],
-    queryFn: async (): Promise<ProofPath | null> => {
+  // The claim's ledger, read owner-only and cachedOnly so opening a pool page
+  // never prompts for a signature. It drives the claim rail's step and the
+  // restored proof path. One read here replaces the wearable-only path probe:
+  // the rail needs the ledger for every joined, payable pool, not just wearable
+  // ones. The refetch interval follows the run - fast while verifying, slow
+  // while a deferred settlement waits, stopped once terminal - and it is a GET
+  // that never drives SPOTTER's run loop, so it does not conflict with the
+  // upload/wearable client that does.
+  const claimLedgerQuery = useQuery<ClaimLedgerData>({
+    queryKey: ["claim-ledger", id, address],
+    queryFn: async (): Promise<ClaimLedgerData> => {
       if (poolId === null || address === null) {
         throw new Error("No claim identity yet.");
       }
@@ -182,16 +196,55 @@ export default function PoolDetail({ id }: { id: string }) {
       }
       const body = (await sent.response.json().catch(() => ({}))) as {
         ledger?: LedgerEntry[];
+        hasLedger?: boolean;
       };
-      return claimProofPathOf(Array.isArray(body.ledger) ? body.ledger : []);
+      const ledger = Array.isArray(body.ledger) ? body.ledger : null;
+      return {
+        ledger,
+        hasLedger: body.hasLedger === true || (ledger?.length ?? 0) > 0,
+      };
     },
-    enabled: poolId !== null && address !== null && joined && isWearableGoal,
+    enabled: poolId !== null && address !== null && joined && canPay,
     retry: false,
-    staleTime: 60_000,
+    staleTime: 5_000,
+    refetchInterval: (query) => {
+      const data = query.state.data;
+      if (data === undefined) return 3_000;
+      const status =
+        data.ledger !== null
+          ? runStatusFromLedger(data.ledger)
+          : data.hasLedger
+            ? "verifying"
+            : null;
+      switch (status) {
+        case "verifying":
+          return 2_500;
+        case "recorded":
+          return 10_000;
+        case "paid":
+        case "no-pay":
+        case "cap-exceeded":
+        case "blocked":
+        case "error":
+          return false;
+        default:
+          // Joined with no claim yet: watch for one starting.
+          return 4_000;
+      }
+    },
   });
 
-  const proofPath: ProofPath =
-    pinnedPath ?? claimPathQuery.data ?? "wearable";
+  const claimLedger = claimLedgerQuery.data?.ledger ?? null;
+  const hasClaim = claimLedgerQuery.data?.hasLedger === true;
+  const runStatus: RunStatus | null =
+    claimLedger !== null
+      ? runStatusFromLedger(claimLedger)
+      : hasClaim
+        ? "verifying"
+        : null;
+  const restoredPath: ProofPath | null =
+    claimLedger !== null ? claimProofPathOf(claimLedger) : null;
+  const proofPath: ProofPath = pinnedPath ?? restoredPath ?? "wearable";
 
   if (poolId === null) {
     return (
@@ -238,7 +291,6 @@ export default function PoolDetail({ id }: { id: string }) {
   const evidenceType = evidenceTypeOf(pool.goalSpec);
   const isDocGoal = evidenceType === "document";
   const goalTitle = displayGoalSpec(pool.goalSpec);
-  const hasJoined = participantQuery.data?.joined === true;
   // joinPool and backGoal revert with PERIOD_ENDED once the period closes,
   // so an expired pool must never offer either action. Evidence and the
   // receipt stay visible for joined participants until settlement runs.
@@ -252,11 +304,54 @@ export default function PoolDetail({ id }: { id: string }) {
   const agentBroke = agentIsBroke(agentWalletQuery.data?.balanceUsd ?? null);
   // Wait for the restore before mounting either tab; mounting the wrong one
   // first would start a poll loop the correct tab then has to supersede.
-  const claimPathPending = isWearableGoal && hasJoined && claimPathQuery.isLoading;
+  const claimPathPending =
+    isWearableGoal && joined && claimLedgerQuery.isLoading;
+
+  // Claim-rail state, derived from the same ledger the receipt reads so the
+  // rail and the workbench can never disagree. The paid step is the ONLY one
+  // that renders a payout figure, and it is fed exclusively by a settle entry
+  // the ledger marked settled - a deferred verdict (runStatus "recorded") maps
+  // to the verdict step and shows verified-and-settling, never paid.
+  const step = claimStepOf(joined, hasClaim, runStatus);
+  const receipt = claimLedger !== null ? projectReceipt(claimLedger) : null;
+  const settledEntry = claimLedger?.find(
+    (e) => e.kind === "settle" && e.status === "settled",
+  );
+  const paid =
+    settledEntry !== undefined &&
+    settledEntry.kind === "settle" &&
+    settledEntry.paidUsd !== undefined
+      ? {
+          paidUsd: toUsd2(settledEntry.paidUsd),
+          txHash: settledEntry.txHash ?? null,
+        }
+      : null;
+  const verdict: VerdictKind | null =
+    runStatus === "recorded"
+      ? "deferred"
+      : runStatus === "no-pay"
+        ? "no-pay"
+        : runStatus === "cap-exceeded" ||
+            runStatus === "blocked" ||
+            runStatus === "error"
+          ? "stopped"
+          : null;
+  const railState: ClaimRailState = {
+    step,
+    spentUsd: receipt?.spentUsd ?? "0.00",
+    capUsd: receipt?.capUsd ?? null,
+    verdict,
+    paid,
+  };
+  // The rail tracks a claim journey, so it shows only where one exists: a live
+  // payable pool, or an expired one the visitor is joined to (their claim can
+  // still settle). Settled or structurally-unpayable pools have no journey.
+  const showRail =
+    canPay && (phase === "live" || (phase === "expired" && joined));
 
   // The single mounted claim surface. Wearable pools default to the wearable
   // check with the document upload one tap away; document pools upload only.
-  const claimSection = !hasJoined ? null : (
+  const claimSection = !joined ? null : (
     <>
       {agentBroke ? (
         <div className="rounded-xl border border-warning/40 bg-warning/10 p-4">
@@ -322,8 +417,8 @@ export default function PoolDetail({ id }: { id: string }) {
     </>
   );
 
-  return (
-    <div className="space-y-8">
+  const workbench = (
+    <div className="min-w-0 space-y-8">
       <div>
         {/* -ml-4 keeps the text optically flush with the heading below while
             the padding gives the link a real 44px thumb target. */}
@@ -373,11 +468,9 @@ export default function PoolDetail({ id }: { id: string }) {
       <div className="grid grid-cols-2 gap-3 sm:grid-cols-3">
         <Stat
           label="Bounty pool"
-          value={
-            <span className="text-accent">{formatUsdc(pool.balance)} USDC</span>
-          }
+          value={<Money usd={formatUsdc(pool.balance)} />}
         />
-        <Stat label="Entry fee" value={`${formatUsdc(pool.entryFee)} USDC`} />
+        <Stat label="Entry fee" value={<Money usd={formatUsdc(pool.entryFee)} />} />
         <Stat
           label="Time remaining"
           value={
@@ -404,7 +497,7 @@ export default function PoolDetail({ id }: { id: string }) {
           <p className="text-xs font-semibold uppercase tracking-wide text-muted">
             Participant actions
           </p>
-          {!poolCanPay(pool) ? (
+          {!canPay ? (
             <section className="rounded-2xl border border-warning/40 bg-warning/10 p-5">
               <h2 className="text-lg font-semibold text-warning">
                 This pool cannot pay out
@@ -416,7 +509,7 @@ export default function PoolDetail({ id }: { id: string }) {
               </p>
               <BrowsePoolsLink label="Find a pool that can pay" />
             </section>
-          ) : unverifiableNow && !hasJoined ? (
+          ) : unverifiableNow && !joined ? (
             <section className="rounded-2xl border border-warning/40 bg-warning/10 p-5">
               <h2 className="text-lg font-semibold text-warning">
                 This goal cannot be verified right now
@@ -445,18 +538,18 @@ export default function PoolDetail({ id }: { id: string }) {
               <JoinPool
                 poolId={pool.id}
                 entryFee={pool.entryFee}
-                alreadyJoined={hasJoined}
+                alreadyJoined={joined}
               />
             </section>
           )}
 
-          {poolCanPay(pool) ? claimSection : null}
+          {canPay ? claimSection : null}
 
           {/* Backers are only ever paid on ACHIEVERS (HealthPools._payBackers).
               A pool that cannot pay its achievers also cannot make backing win,
               and with join/upload suppressed no one here can become an achiever,
               so a stake would only forfeit. Hide backing on unpayable pools. */}
-          {poolCanPay(pool) ? (
+          {canPay ? (
             <section className="rounded-2xl border border-edge bg-surface p-5">
               <BackGoal poolId={pool.id} />
             </section>
@@ -471,7 +564,7 @@ export default function PoolDetail({ id }: { id: string }) {
               and backing are closed. SPOTTER settles the payouts for verified
               achievers now that the period is over.
             </p>
-            {!hasJoined ? (
+            {!joined ? (
               <>
                 <p className="mt-2 text-sm text-muted">
                   {participantCount === 0
@@ -483,7 +576,7 @@ export default function PoolDetail({ id }: { id: string }) {
             ) : null}
           </section>
 
-          {hasJoined ? (
+          {joined ? (
             <>
               <p className="text-xs font-semibold uppercase tracking-wide text-muted">
                 Your claim
@@ -503,7 +596,7 @@ export default function PoolDetail({ id }: { id: string }) {
         </section>
       )}
 
-      {phase !== "settled" && poolCanPay(pool) ? (
+      {phase !== "settled" && canPay ? (
         <div className="space-y-4">
           <p className="text-xs font-semibold uppercase tracking-wide text-muted">
             Sponsor action
@@ -513,6 +606,18 @@ export default function PoolDetail({ id }: { id: string }) {
           </section>
         </div>
       ) : null}
+    </div>
+  );
+
+  // Two-column on desktop: the workbench (actions + detailed receipt) on the
+  // left, the sticky claim rail on the right. On mobile the rail becomes a
+  // fixed bottom sheet, so the page reserves room beneath the content for it.
+  return (
+    <div className={showRail ? "pb-24 lg:pb-0" : undefined}>
+      <div className="lg:grid lg:grid-cols-[minmax(0,1fr)_20rem] lg:items-start lg:gap-8">
+        {workbench}
+        {showRail ? <ClaimRail state={railState} /> : null}
+      </div>
     </div>
   );
 }

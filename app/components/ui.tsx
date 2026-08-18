@@ -131,11 +131,16 @@ export function Money({
   usd,
   sign,
   size = "md",
+  tone = "default",
 }: {
   /** Whole-USD string with two decimals, exactly as the ledger recorded it. */
   usd: string;
   sign?: "+" | "-";
   size?: "sm" | "md" | "lg" | "xl";
+  /** "gold" is reserved for money in motion - a payout landing or the agent's
+   *  live spend. Static figures stay "default". No adjective ever lives here;
+   *  the tone is the only thing that changes. */
+  tone?: "default" | "gold";
 }) {
   const sizes: Record<string, string> = {
     sm: "text-sm",
@@ -143,9 +148,13 @@ export function Money({
     lg: "text-2xl",
     xl: "text-4xl",
   };
+  const tones: Record<string, string> = {
+    default: "text-foreground",
+    gold: "text-gold",
+  };
   return (
     <span
-      className={`font-mono font-semibold tabular-nums text-foreground ${sizes[size]}`}
+      className={`font-mono font-semibold tabular-nums ${tones[tone]} ${sizes[size]}`}
     >
       {sign !== undefined ? sign : ""}
       {usd} USDC
@@ -185,15 +194,18 @@ export function Stamp({
   tone = "accent",
 }: {
   children: ReactNode;
-  tone?: "accent" | "danger";
+  /** "gold" marks money in motion (a landed payout); "accent" is the trust
+   *  stamp; "danger" a rejection. */
+  tone?: "accent" | "danger" | "gold";
 }) {
+  const tones: Record<string, string> = {
+    accent: "border-accent text-accent",
+    danger: "border-danger text-danger",
+    gold: "border-gold text-gold",
+  };
   return (
     <span
-      className={`animate-stamp-in inline-block rounded-md border-2 px-3 py-1 font-mono text-sm font-bold uppercase tracking-widest ${
-        tone === "accent"
-          ? "border-accent text-accent"
-          : "border-danger text-danger"
-      }`}
+      className={`animate-stamp-in inline-block rounded-md border-2 px-3 py-1 font-mono text-sm font-bold uppercase tracking-widest ${tones[tone]}`}
       style={{ transform: "rotate(-3deg)" }}
     >
       {children}
