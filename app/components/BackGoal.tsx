@@ -8,10 +8,10 @@ import {
   fetchParticipants,
   getHealthPoolsAddress,
   parseUsdc,
-  shortAddress,
 } from "@/lib/contract";
 import { useEmbeddedWallet } from "@/lib/wallet";
 import { useUsdcDeposit } from "@/lib/useUsdcDeposit";
+import { useDisplayNames } from "@/lib/use-display-names";
 import { ArcTxLink, ErrorNote } from "@/components/ui";
 
 function BackGoalInner({ poolId }: { poolId: bigint }) {
@@ -26,6 +26,9 @@ function BackGoalInner({ poolId }: { poolId: bigint }) {
     queryKey: ["participants", poolId.toString()],
     queryFn: () => fetchParticipants(poolId),
   });
+
+  const participants = participantsQuery.data ?? [];
+  const { displayName } = useDisplayNames(participants);
 
   const poolsAddress = getHealthPoolsAddress();
   if (poolsAddress === null) {
@@ -66,8 +69,6 @@ function BackGoalInner({ poolId }: { poolId: bigint }) {
       // useUsdcDeposit captured the error into status.
     }
   };
-
-  const participants = participantsQuery.data ?? [];
 
   const primaryLabel =
     status.kind === "approving"
@@ -123,8 +124,8 @@ function BackGoalInner({ poolId }: { poolId: bigint }) {
               {participants.map((p) => (
                 <option key={p} value={p}>
                   {address !== null && p.toLowerCase() === address.toLowerCase()
-                    ? `${shortAddress(p)} (you)`
-                    : shortAddress(p)}
+                    ? `${displayName(p)} (you)`
+                    : displayName(p)}
                 </option>
               ))}
             </select>

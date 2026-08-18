@@ -34,10 +34,10 @@ import {
   fetchParticipants,
   fetchPool,
   formatUsdc,
-  shortAddress,
 } from "@/lib/contract";
 import { poolCanPay, poolPhase } from "@/lib/pool-lifecycle";
 import { useEmbeddedWallet } from "@/lib/wallet";
+import { useDisplayNames } from "@/lib/use-display-names";
 
 function formatDay(seconds: bigint): string {
   return new Date(Number(seconds) * 1000).toLocaleDateString("en-US", {
@@ -189,6 +189,13 @@ export default function PoolDetail({ id }: { id: string }) {
     retry: false,
     staleTime: 60_000,
   });
+
+  // Resolve the funder address to a handle when it has claimed one. Called
+  // unconditionally with whatever is known this render (empty until the pool
+  // loads), so the rules of hooks hold across the early returns below.
+  const { displayName } = useDisplayNames(
+    poolQuery.data ? [poolQuery.data.pool.creator] : [],
+  );
 
   const proofPath: ProofPath =
     pinnedPath ?? claimPathQuery.data ?? "wearable";
@@ -365,7 +372,7 @@ export default function PoolDetail({ id }: { id: string }) {
             rel="noopener noreferrer"
             className="font-mono underline decoration-edge underline-offset-2 hover:text-foreground"
           >
-            {shortAddress(pool.creator)}
+            {displayName(pool.creator)}
           </a>
         </p>
       </div>

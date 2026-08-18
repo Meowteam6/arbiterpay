@@ -45,6 +45,21 @@ export const FAUCET_COOLDOWN_MS = DAY_MS;
  */
 export const FAUCET_DAILY_BUDGET_UUSDC = 5_000_000n;
 
+/**
+ * Sub-ceiling for AUTOMATIC faucet grants, on the same daily counter: 2.50
+ * USDC (half the daily budget). A grant the app fires automatically (the
+ * first-block auto-fund) is charged against this lower ceiling, so the auto
+ * path can consume at most half the day's budget no matter how many pages are
+ * loaded. The other half is reserved for DELIBERATE taps - a real user who
+ * actually wants to fund, and the on-camera demo tap - which are charged
+ * against the full FAUCET_DAILY_BUDGET_UUSDC. Because auto contributions can
+ * never exceed this, a deliberate tap always has at least
+ * (FAUCET_DAILY_BUDGET_UUSDC - FAUCET_AUTO_BUDGET_UUSDC) left to draw on. This
+ * is a strictly LOWER ceiling than the daily budget, never a raise. It must
+ * stay a whole number of grants and strictly below the daily budget.
+ */
+export const FAUCET_AUTO_BUDGET_UUSDC = 2_500_000n;
+
 /** Real Arc USDC one address may move out of the treasury per window: 2.00. */
 export const WITHDRAW_DAILY_CAP_UUSDC = 2_000_000n;
 

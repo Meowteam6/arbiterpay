@@ -12,6 +12,10 @@
   --accent-deep: #064e3b;
   --danger: #f87171;
   --warning: #fbbf24;
+  /* The single warm accent, reserved for money in motion: USDC amounts only.
+     Emerald stays the trust/verdict color; gold never labels anything but a
+     dollar figure. */
+  --gold: #f5b942;
 }
 
 @theme inline {
@@ -26,6 +30,7 @@
   --color-accent-deep: var(--accent-deep);
   --color-danger: var(--danger);
   --color-warning: var(--warning);
+  --color-gold: var(--gold);
   --font-sans: var(--font-geist-sans);
   --font-mono: var(--font-geist-mono);
 }
@@ -65,6 +70,19 @@ body {
   }
 }
 
+/* Staggered entrance for payout/win rows. Decoration only: with animation off
+   the row is at rest, in place, and fully legible. */
+@keyframes ghm-rise-in {
+  from {
+    transform: translateY(6px);
+    opacity: 0;
+  }
+  to {
+    transform: translateY(0);
+    opacity: 1;
+  }
+}
+
 .animate-stamp-in {
   animation: stamp-in 240ms cubic-bezier(0.2, 0.9, 0.3, 1.4) both;
 }
@@ -73,9 +91,14 @@ body {
   animation: rise-in 200ms ease-out both;
 }
 
+.ghm-rise-in {
+  animation: ghm-rise-in 260ms ease-out both;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-stamp-in,
-  .animate-rise-in {
+  .animate-rise-in,
+  .ghm-rise-in {
     animation: none;
   }
 }

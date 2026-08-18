@@ -183,10 +183,80 @@ export const healthPoolsAbi = [
       { name: "bountyModel", type: "uint8", indexed: false },
     ],
   },
+  // Read-only money/identity events for the social layer. These carry
+  // addresses, amounts, and tx hashes ONLY - no initiative, no goalSpec, no
+  // health string of any kind - so aggregating them is redaction-safe by
+  // construction. Signatures verified against contracts/src/HealthPools.sol.
+  {
+    type: "event",
+    name: "PoolJoined",
+    inputs: [
+      { name: "poolId", type: "uint256", indexed: true },
+      { name: "participant", type: "address", indexed: true },
+      { name: "nullifierHash", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "ResultRecorded",
+    inputs: [
+      { name: "poolId", type: "uint256", indexed: true },
+      { name: "participant", type: "address", indexed: true },
+      { name: "verdict", type: "bool", indexed: false },
+      { name: "multiplierBps", type: "uint16", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "GoalBacked",
+    inputs: [
+      { name: "poolId", type: "uint256", indexed: true },
+      { name: "participant", type: "address", indexed: true },
+      { name: "backer", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "BackerPaid",
+    inputs: [
+      { name: "poolId", type: "uint256", indexed: true },
+      { name: "backer", type: "address", indexed: true },
+      { name: "participant", type: "address", indexed: false },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
+  {
+    type: "event",
+    name: "AchieverPaid",
+    inputs: [
+      { name: "poolId", type: "uint256", indexed: true },
+      { name: "participant", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
 ] as const;
 
 export const poolCreatedEvent = parseAbiItem(
   "event PoolCreated(uint256 indexed poolId, address indexed creator, string initiative, string goalSpec, uint256 entryFee, uint64 periodStart, uint64 periodEnd, uint8 bountyModel)",
+);
+
+// Parsed event items for getLogs in the social-stats aggregator. Indexed
+// address params let the RPC filter server-side per wallet.
+export const achieverPaidEvent = parseAbiItem(
+  "event AchieverPaid(uint256 indexed poolId, address indexed participant, uint256 amount)",
+);
+export const backerPaidEvent = parseAbiItem(
+  "event BackerPaid(uint256 indexed poolId, address indexed backer, address participant, uint256 amount)",
+);
+export const goalBackedEvent = parseAbiItem(
+  "event GoalBacked(uint256 indexed poolId, address indexed participant, address indexed backer, uint256 amount)",
+);
+export const poolJoinedEvent = parseAbiItem(
+  "event PoolJoined(uint256 indexed poolId, address indexed participant, uint256 nullifierHash)",
+);
+export const resultRecordedEvent = parseAbiItem(
+  "event ResultRecorded(uint256 indexed poolId, address indexed participant, bool verdict, uint16 multiplierBps)",
 );
 
 export const erc20Abi = [

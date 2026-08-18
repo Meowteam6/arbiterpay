@@ -57,6 +57,18 @@ export default function Home() {
           >
             sponsoring instead? put up a bounty
           </Link>
+          <Link
+            href="/feed"
+            className="text-sm font-medium text-muted underline-offset-4 hover:text-foreground hover:underline"
+          >
+            see who got paid
+          </Link>
+          <Link
+            href="/handle"
+            className="text-sm font-medium text-muted underline-offset-4 hover:text-foreground hover:underline"
+          >
+            claim your handle
+          </Link>
         </div>
       </section>
 

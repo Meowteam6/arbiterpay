@@ -6,6 +6,7 @@ import { DynamicConnectButton } from "@dynamic-labs/sdk-react-core";
 import { DEMO_CHROME, DYNAMIC_CONFIGURED } from "@/lib/config";
 import { useEmbeddedWallet } from "@/lib/wallet";
 import AgentStrip from "@/components/AgentStrip";
+import TestUsdcChip from "@/components/TestUsdcChip";
 import { CopyAddressButton } from "@/components/FundingHelp";
 
 // "Create pool" is deliberately NOT here. It is the sponsor's action - it
@@ -126,7 +127,12 @@ function HeaderNote() {
   return (
     <div className="border-t border-edge bg-surface/60">
       <div className="mx-auto flex max-w-5xl flex-wrap items-center justify-between gap-x-3 px-3 sm:px-4">
-        {DYNAMIC_CONFIGURED ? <WalletNote /> : null}
+        {DYNAMIC_CONFIGURED ? (
+          <div className="flex flex-wrap items-center gap-x-3">
+            <WalletNote />
+            <TestUsdcChip />
+          </div>
+        ) : null}
         <div className="ml-auto shrink-0">
           <AgentStrip />
         </div>

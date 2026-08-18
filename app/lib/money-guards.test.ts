@@ -2,6 +2,7 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import {
   BLINK_ALLOWED_CHAIN_ID,
   BLINK_MAX_DEPOSIT_USD,
+  FAUCET_AUTO_BUDGET_UUSDC,
   FAUCET_COOLDOWN_MS,
   FAUCET_DAILY_BUDGET_UUSDC,
   FAUCET_GRANT_UUSDC,
@@ -148,6 +149,53 @@ describe("spendVerdict", () => {
       spendVerdict(WITHDRAW_DAILY_CAP_UUSDC + 1n, 1n, WITHDRAW_DAILY_CAP_UUSDC)
         .kind,
     ).toBe("deny");
+  });
+});
+
+describe("faucet auto-reserve", () => {
+  it("is a whole number of grants, strictly below the daily budget", () => {
+    expect(FAUCET_AUTO_BUDGET_UUSDC).toBeGreaterThan(0n);
+    expect(FAUCET_AUTO_BUDGET_UUSDC).toBeLessThan(FAUCET_DAILY_BUDGET_UUSDC);
+    expect(FAUCET_AUTO_BUDGET_UUSDC % FAUCET_GRANT_UUSDC).toBe(0n);
+  });
+
+  it("bounds automatic grants to the reserve, leaving the remainder for deliberate taps", () => {
+    // Automatic grants are charged against the lower reserve on the SAME shared
+    // daily counter, so once the running total crosses the reserve the auto
+    // path is denied while the counter keeps its true (handed-back) total.
+    let total = 0n;
+    let autoAllowed = 0;
+    for (let i = 0; i < 100; i += 1) {
+      total += FAUCET_GRANT_UUSDC;
+      const verdict = spendVerdict(
+        total,
+        FAUCET_GRANT_UUSDC,
+        FAUCET_AUTO_BUDGET_UUSDC,
+      );
+      if (verdict.kind === "allow") {
+        autoAllowed += 1;
+      } else {
+        // The denied increment is handed straight back, mirroring the route.
+        total -= FAUCET_GRANT_UUSDC;
+        break;
+      }
+    }
+    // The auto path consumes at most the reserve, never more.
+    expect(BigInt(autoAllowed) * FAUCET_GRANT_UUSDC).toBe(
+      FAUCET_AUTO_BUDGET_UUSDC,
+    );
+    // And a deliberate tap (full daily budget) still has the reserved remainder
+    // to draw on after the auto path is spent out.
+    expect(FAUCET_DAILY_BUDGET_UUSDC - total).toBe(
+      FAUCET_DAILY_BUDGET_UUSDC - FAUCET_AUTO_BUDGET_UUSDC,
+    );
+    expect(
+      spendVerdict(
+        total + FAUCET_GRANT_UUSDC,
+        FAUCET_GRANT_UUSDC,
+        FAUCET_DAILY_BUDGET_UUSDC,
+      ).kind,
+    ).toBe("allow");
   });
 });
 

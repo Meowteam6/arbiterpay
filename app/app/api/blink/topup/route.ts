@@ -23,7 +23,12 @@
 // The cap arithmetic lives in app/lib/money-guards.ts with unit tests; the
 // atomic reservation lives in app/app/api/_money/rate-limit.ts.
 //
-// Request JSON:  { address: string }
+// Request JSON:  { address: string, auto?: boolean }
+//   `auto: true` marks a grant the app fired automatically (the first-block
+//   auto-fund) rather than one a user deliberately tapped. Automatic grants are
+//   charged against FAUCET_AUTO_BUDGET_UUSDC, a lower reserve, so incidental
+//   page loads cannot exhaust the budget a deliberate tap needs. It can only
+//   narrow the budget for a request, never widen it.
 //   A `ref` field is accepted and IGNORED. It used to be the idempotency key
 //   and old clients still send one; honouring it is the exploit.
 //
@@ -37,6 +42,7 @@ import { credit, getBalance } from "@/lib/server/balance";
 import { jsonError, readJsonBody } from "@/lib/server/http";
 import { formatUsdc } from "@/lib/contract";
 import {
+  FAUCET_AUTO_BUDGET_UUSDC,
   FAUCET_COOLDOWN_MS,
   FAUCET_DAILY_BUDGET_UUSDC,
   FAUCET_GRANT_UUSDC,
@@ -82,10 +88,19 @@ export async function POST(request: Request) {
       return jsonError(400, "Body must be a JSON object.");
     }
 
-    const { address } = body;
+    const { address, auto } = body;
     if (typeof address !== "string" || !isAddress(address)) {
       return jsonError(400, "address must be a valid 0x address");
     }
+    // A grant the app fires AUTOMATICALLY (the first-block auto-fund) is charged
+    // against a lower reserve so incidental page loads cannot drain the budget a
+    // deliberate tap - a real user, or the on-camera demo - needs. Any non-true
+    // value (absent, false) is a deliberate grant. This only ever NARROWS the
+    // budget for a request, never widens it.
+    const isAuto = auto === true;
+    const budgetCapUusdc = isAuto
+      ? FAUCET_AUTO_BUDGET_UUSDC
+      : FAUCET_DAILY_BUDGET_UUSDC;
     const recipient = address as Address;
     const now = Date.now();
     const addressKey = `faucet:address:${recipient.toLowerCase()}`;
@@ -130,14 +145,16 @@ export async function POST(request: Request) {
     const budget = await spendFromWindow(
       GLOBAL_BUDGET_KEY,
       FAUCET_GRANT_UUSDC,
-      FAUCET_DAILY_BUDGET_UUSDC,
+      budgetCapUusdc,
       FAUCET_COOLDOWN_MS,
       now,
     );
     if (budget.kind === "deny") {
       await releaseOncePerWindow(addressKey, FAUCET_COOLDOWN_MS, now);
       return tooManyRequests(
-        `The faucet has handed out its ${formatUsdc(FAUCET_DAILY_BUDGET_UUSDC)} USDC for today. Try again tomorrow.`,
+        isAuto
+          ? "The automatic faucet reserve for today is used up. Tap Get test USDC to draw from the full faucet."
+          : `The faucet has handed out its ${formatUsdc(FAUCET_DAILY_BUDGET_UUSDC)} USDC for today. Try again tomorrow.`,
         budget.retryAfterSeconds,
       );
     }
