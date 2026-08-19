@@ -24,11 +24,87 @@ a live production defect (three of five deployed pools), not a latent one.
 
 ---
 
+## Remediation status (this pass)
+
+Each finding is closed in exactly one of three ways, never conflated:
+
+- **app-guarded-live** — the deployed bytecode is immutable, so the finding is *prevented*
+  at the creation/config layer on the live contract, not *fixed* in it.
+- **fixed-in-V2** — a mechanical fix lands in the remediation candidate
+  `contracts/src/HealthPoolsV2.sol` (banner: UNAUDITED, NOT DEPLOYED). It closes the finding
+  only once that audited contract is deployed; on the live contract the finding stands.
+- **decision-gated** — a posture the founders (and the auditor) must rule on. V2 leaves it
+  functionally identical to v1 on purpose; changing it is a governance/product call, not a
+  code defect.
+
+`HealthPools.sol` and `HealthVerdict.sol` were not touched (empty git diff). The suite is now
+**117 tests** (76 v1 baseline unchanged + 41 new V2: 27 unit, 2 gas, 9 fuzz at 256 runs,
+3 stateful-invariant), all green.
+
+| ID | Severity | Resolution | Proof (guard / test) | On the live immutable contract |
+|---|---|---|---|---|
+| F-1 | High | app-guarded-live **and** fixed-in-V2 | app: `isEconomicallyDeadConfig` in `app/lib/pool-lifecycle.ts`, enforced at the `runUsdcDeposit` funnel (`app/lib/useUsdcDeposit.ts`, the chokepoint every USDC-pulling createPool passes) and again at the `CreatePool.tsx` submit; scripts: `scripts/assert-payable.sh` sourced by all five createPool scripts; app tests `pool-lifecycle.test.ts` (15). V2: `createPool` reverts `DEAD_CONFIG` — `test_finding_F1_deadConfigRevertsAtCreate`, `test_finding_F1_guardIsNarrow`, `testFuzz_F1_model0ZeroFeeAlwaysReverts` | **PREVENTED, not fixed.** No new dead pool can be created through the app or scripts. The three already-dead pools stay dead forever (`entryFee` is write-once); nothing off-chain can repair them. |
+| F-2 | Medium | decision-gated | V2 `recordResult`/`_isAchiever` functionally identical to v1 (`onlyOracle`, registry as AND-gate), carrying an inline `DECISION-GATED (F-2)` comment | Unchanged. Founder/auditor posture: gate-on enforcement + oracle key custody. |
+| F-3 | Medium (KNOWN) | decision-gated | V2 `settle()`/`settleStep()` both `external nonReentrant`, no auth — permissionless posture preserved; inline `DECISION-GATED (F-3)` comment. **NB: settle() body is rewritten for F-4, so it is not byte-identical to v1 — the access-control decision is what is unchanged.** | Unchanged and deliberate (zero-Solidity-change Circle settler). |
+| F-4 | Medium | fixed-in-V2 (pagination) | V2 3-phase idempotent state machine + `settleStep(poolId, maxSteps)`. `test_F4_v1SingleSettleExceedsBlockLimit`, `test_F4_v2PaginatedSettleStaysUnderBlockLimit`, `test_F4_paginatedEqualsSingleCall`, `testFuzz_F4_paginationPaysSameAsAtomic`, `test_F4_settleFinishesAPartialSettleStep`, `test_F4_sweepBlockedUntilSettlementComplete` | **UNRESOLVED on live.** No app-layer mitigation exists — a pool grown to the caps with the gate ON is unsettleable and its funds lock. Measured below. Only the V2 redeploy closes it. |
+| F-5 | Low | fixed-in-V2 (balance-delta) | V2 `_pull`/`_push` credit the measured delta; `test_finding_F5_feeOnTransferCreditsMeasuredDelta` | Assumption only for Arc USDC (standard 6-decimal). Live risk = zero unless the asset is ever swapped. |
+| F-6 | Low | fixed-in-V2 (multiply-before-divide) | V2 `_achieverPayout` uses un-floored weights; `test_finding_F6_multiplyBeforeDivideKeepsPrecision` | Live rounds down, never overpays (dust to creator). Cosmetic. |
+| F-7 | Low | fixed-in-V2 (constructor code check) | V2 constructor `require(token.code.length > 0)`; `test_finding_F7_constructorRejectsNonContractToken` | Deploy-time only. Live `usdc` is the canonical Arc contract — non-issue. |
+| F-8 | Info | reviewed non-exploitable | No change. `nonReentrant` + per-iteration CEI + USDC has no callback (V2 preserves all three) | No action. |
+| F-9 | Info | decision-gated | V2 `setOracle`/`setHealthVerdict(0)`/`transferOwnership` functionally identical to v1, inline `DECISION-GATED (F-9)` comment | Unchanged trusted-owner posture. Timelock/multisig is a governance call. |
+
+### F-4 measured gas ceiling (the single most important number)
+
+Profiled at `MAX_PARTICIPANTS` (200) x `MAX_BACKERS_PER_GOAL` (50) with the verdict gate ON,
+against a 30,000,000-gas block:
+
+| Path | Gas | Verdict |
+|---|---|---|
+| v1 single `settle()` (the live contract) | **76,964,345** | ~2.57x a 30M block — the maxed pool cannot settle in one transaction; funds lock. The fund-lock risk is real, not theoretical. |
+| V2 `settleStep(poolId, 2)`, worst single step | **881,127** | Comfortably under a block. |
+| V2 full drain of the same pool | **300 steps** | Every step < 30M; all achievers paid (asserted on the aggregate USDC delta), remaining balance < rounding dust, contract solvent throughout. |
+
+So the audit's flagged fund-lock is reproduced on the immutable contract and closed in V2 —
+but only closed in production when the audited V2 is deployed.
+
+### Overclaims caught and corrected in this pass
+
+Two claims from the build summaries were imprecise and are corrected here:
+
+1. *"F-2 / F-3 / F-9 are byte-for-byte identical to v1."* True for **F-2 and F-9** (their
+   function bodies are unchanged bar an added comment). **False for F-3:** V2's `settle()` is
+   fully rewritten for the F-4 pagination fix, and V2 adds a new permissionless `settleStep()`.
+   What is preserved is F-3's **access-control decision** (both entry points are permissionless,
+   no auth) — the decision is not silently changed, but the code is not byte-identical.
+2. *"V2's single-call settle() is numerically identical to v1 for every pool v1 can settle."*
+   True for pot-split and fully-funded fixed-bounty pools. **The underfunded multi-achiever
+   fixed-bounty branch deliberately differs** — F-6 multiplies the un-floored weight before
+   dividing, so per-achiever payouts round more precisely than v1. It never overpays the pot
+   (`testFuzz_fixedBounty_neverExceedsOwedOrPot`), but it is an intended improvement, not
+   parity.
+
+### Decision-gated items the founders must still rule on
+
+No `Mainnet-Roadmap.md` exists yet; the V2 inline comments forward-reference one. These are the
+rulings that doc should capture (do not treat any as resolved):
+
+- **F-3 permissionless `settle()`** — keep it permissionless (what makes the Circle agent a
+  zero-Solidity-change settler) versus the authorized-settler + public-grace-fallback redesign.
+  This is the reward-vs-wager / custodial call and is intentionally NOT made in V2.
+- **F-2 oracle trust** — confirm the verdict gate is ON in production and set the oracle
+  key-custody posture to match the treasury.
+- **F-9 owner privileges** — trusted-owner (current) versus a timelock/multisig for
+  `setOracle` / `setHealthVerdict(0)` / `overrideVerdict` / `transferOwnership`.
+
+---
+
 ## What was added to the suite
 
 New file: `contracts/test/HealthPoolsInvariant.t.sol` (11 tests). Config: `[fuzz]` and
-`[invariant]` profiles added to `foundry.toml`. Baseline was 65 tests; suite is now 76,
-all green.
+`[invariant]` profiles added to `foundry.toml`. This raised the v1 suite from 65 to 76
+tests. The remediation candidate then added `contracts/src/HealthPoolsV2.sol` and its
+41-test suite `contracts/test/HealthPoolsV2.t.sol`, for **117 total, all green** (see
+Remediation status above for the finding-by-finding mapping).
 
 Stateful invariants (Handler-driven random lifecycle: create -> join -> back/fund ->
 record -> warp -> settle -> sweep):
@@ -57,10 +133,11 @@ Reproduce:
 
 ```
 cd contracts && export PATH="$HOME/.foundry/bin:$PATH"
-forge test                                          # full suite, 76 pass
+forge test                                          # full suite, 117 pass
 forge test --fuzz-runs 10000 --match-contract HealthPoolsFuzzTest
 FOUNDRY_INVARIANT_RUNS=256 FOUNDRY_INVARIANT_DEPTH=200 \
   forge test --match-contract HealthPoolsInvariantTest
+forge test --match-contract HealthPoolsV2GasTest -vv # F-4 gas profile at 200 x 50
 ```
 
 ---

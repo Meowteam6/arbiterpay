@@ -16,6 +16,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
 export PATH="$PATH:$HOME/.foundry/bin"
+source "$ROOT/scripts/assert-payable.sh"
 
 RPC=https://rpc.testnet.arc.network
 USDC=0x3600000000000000000000000000000000000000
@@ -54,6 +55,7 @@ echo "   gate ON: healthVerdict = $(cast call "$NEWPOOLS" 'healthVerdict()(addre
 
 # 3) Create + fund a short split-pot pool (entry 0, 2 USDC pot, 120s window)
 NOW=$(date +%s); END=$((NOW + 120))
+assert_payable_pool_config 0 1
 cast send "$USDC" 'approve(address,uint256)' "$NEWPOOLS" 2000000 --private-key "$DPK" --rpc-url "$RPC" >/dev/null
 cast send "$NEWPOOLS" 'createPool(string,string,uint256,uint64,uint64,uint8,uint256)' \
   "tier1-gate-proof" "[doc] total cholesterol under 200 mg/dL" 0 "$NOW" "$END" 1 2000000 \

@@ -15,6 +15,7 @@ import {
 } from "@/lib/contract";
 import { useEmbeddedWallet } from "@/lib/wallet";
 import { useUsdcDeposit } from "@/lib/useUsdcDeposit";
+import { isEconomicallyDeadConfig } from "@/lib/pool-lifecycle";
 import { ArcTxLink, ErrorNote } from "@/components/ui";
 
 const DURATION_OPTIONS: { label: string; days: number }[] = [
@@ -195,6 +196,19 @@ function CreatePoolInner() {
         ? withDocMarker(goalSpec.trim())
         : goalSpec.trim();
 
+    // A fixed bounty pays entryFee * multiplier, so at a zero fee it settles to
+    // zero for everyone: force the split-pot model when the fee is zero, then
+    // hard-block on the shared F-1 predicate as a backstop. The UI already
+    // disables the model-0 radio at a zero fee, but the assertion is what makes
+    // it airtight if that derivation ever regresses.
+    const bountyModelToUse = entryFeeUsdc === 0n ? 1 : bountyModel;
+    if (isEconomicallyDeadConfig(bountyModelToUse, entryFeeUsdc)) {
+      setFormError(
+        "A fixed-bounty pool needs an entry fee above zero, or switch to split the pot. This config would pay every achiever zero.",
+      );
+      return;
+    }
+
     try {
       const depositHash = await runUsdcDeposit(fundingUsdc, {
         functionName: "createPool",
@@ -204,7 +218,7 @@ function CreatePoolInner() {
           entryFeeUsdc,
           periodStart,
           periodEnd,
-          entryFeeUsdc === 0n ? 1 : bountyModel,
+          bountyModelToUse,
           fundingUsdc,
         ],
       });

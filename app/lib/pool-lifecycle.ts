@@ -33,24 +33,41 @@ export interface PayabilityFields {
 }
 
 /**
- * Whether a pool can pay an achiever at all.
+ * The one createPool config that structurally cannot pay any achiever: a
+ * fixed-bounty pool (bountyModel 0) with a zero entry fee.
  *
- * HealthPools._payAchievers under bountyModel 0 (fixed bounty) derives every
- * payout from entryFee: `totalOwed += entryFee * multiplierBps / BPS`, and
- * returns early when totalOwed is zero. So a pool created with bountyModel 0
- * AND entryFee 0 settles to nobody no matter how much USDC is in it - the
- * settle transaction succeeds, AchieverPaid never fires, and the participant
- * is paid nothing. Funding it does not help; entryFee is write-once in
- * createPool, so such a pool can never be repaired.
+ * HealthPools._payAchievers under bountyModel 0 derives every payout from
+ * entryFee: `totalOwed += entryFee * multiplierBps / BPS`, and returns early
+ * when totalOwed is zero. So a pool created with bountyModel 0 AND entryFee 0
+ * settles to nobody no matter how much USDC is in it - the settle transaction
+ * succeeds, AchieverPaid never fires, the participant is paid nothing, and the
+ * whole pot is reclaimable by the creator via sweep(). entryFee is write-once
+ * in createPool, so such a pool can never be repaired after creation.
  *
  * bountyModel 1 splits the pot pro-rata and is unaffected by entryFee.
  *
- * Callers hide these from the joinable list. This is a predicate rather than
- * a list of pool ids on purpose: it also catches any future pool seeded the
- * same way.
+ * This is the single source of truth for that invariant (audit finding F-1).
+ * The create path guards on it before any tx is sent (CreatePool submit and the
+ * runUsdcDeposit funnel that every USDC-pulling call passes through); the read
+ * path uses its negation, poolCanPay, to hide unpayable pools from the list.
+ * The deployed contract is immutable and does not enforce it, so these
+ * off-chain guards are what keep new dead pools from being created on it.
+ */
+export function isEconomicallyDeadConfig(
+  bountyModel: number,
+  entryFee: bigint,
+): boolean {
+  return bountyModel === 0 && entryFee === 0n;
+}
+
+/**
+ * Whether a pool can pay an achiever at all - the negation of
+ * isEconomicallyDeadConfig. This is a predicate rather than a list of pool ids
+ * on purpose: it also catches any future pool seeded the same way. Callers hide
+ * failing pools from the joinable list.
  */
 export function poolCanPay(pool: PayabilityFields): boolean {
-  return pool.bountyModel !== 0 || pool.entryFee > 0n;
+  return !isEconomicallyDeadConfig(pool.bountyModel, pool.entryFee);
 }
 
 export interface GroupedPools<T> {

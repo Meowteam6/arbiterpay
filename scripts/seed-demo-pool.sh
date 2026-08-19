@@ -20,6 +20,7 @@
 set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"; cd "$ROOT"
 export PATH="$PATH:$HOME/.foundry/bin"
+source "$ROOT/scripts/assert-payable.sh"
 set -a; source .env; set +a
 
 RPC="${ARC_RPC_URL:-https://rpc.testnet.arc.network}"
@@ -44,6 +45,7 @@ echo "goal       $GOAL_SPEC"
 NOW="$(date +%s)"; END=$((NOW + PERIOD))
 
 # entryFee 0 REQUIRES bountyModel 1 (split pot); see header.
+assert_payable_pool_config 0 1
 echo "-> approve + createPool (model 1, entry 0)"
 cast send "$USDC" "approve(address,uint256)" "$POOLS" "$FUND" \
   --private-key "$DK" --rpc-url "$RPC" >/dev/null

@@ -16,6 +16,7 @@ import {
   humanizeTxError,
   JOIN_GAS_MARGIN,
 } from "@/lib/tx-errors";
+import { isEconomicallyDeadConfig } from "@/lib/pool-lifecycle";
 import { useEmbeddedWallet } from "@/lib/wallet";
 
 /**
@@ -115,6 +116,23 @@ export function useUsdcDeposit(): UseUsdcDepositResult {
         const message = "Deposit amount must be greater than zero.";
         setStatus({ kind: "error", message });
         throw new Error(message);
+      }
+
+      // Airtight F-1 guard. Every USDC-pulling createPool in the app funnels
+      // through here, so this is the one chokepoint that keeps an economically
+      // dead pool (fixed bounty at a zero entry fee) off the immutable
+      // contract, even from a future caller that builds the args wrong. The
+      // createPool args tuple is [initiative, goalSpec, entryFee, periodStart,
+      // periodEnd, bountyModel, funding]; guard on entryFee and bountyModel.
+      if (call.functionName === "createPool") {
+        const entryFee = call.args[2];
+        const bountyModel = call.args[5];
+        if (isEconomicallyDeadConfig(bountyModel, entryFee)) {
+          const message =
+            "This pool config cannot pay anyone: a fixed bounty at a zero entry fee settles to zero for every achiever. Set an entry fee above zero, or split the pot.";
+          setStatus({ kind: "error", message });
+          throw new Error(message);
+        }
       }
 
       // Set by the preflight below so the catch keeps the funding message

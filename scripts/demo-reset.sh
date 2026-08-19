@@ -33,6 +33,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
 export PATH="$PATH:$HOME/.foundry/bin"
+source "$ROOT/scripts/assert-payable.sh"
 
 [ -f .env ] || { echo "error: .env not found at repo root" >&2; exit 1; }
 set -a; source .env; set +a
@@ -124,6 +125,9 @@ NOW="$(date +%s)"
 seed_pool() {
   local initiative="$1" goal="$2" entry="$3" days="$4" model="$5" funding="${6:-$FUND}"
   local end=$((NOW + days * 86400))
+  # F-1 guard: never seed a fixed bounty (model 0) at a zero entry fee -- it
+  # settles to zero for every achiever. Aborts the whole reset before any tx.
+  assert_payable_pool_config "$entry" "$model"
   cast send "$POOLS" \
     "createPool(string,string,uint256,uint64,uint64,uint8,uint256)" \
     "$initiative" "$goal" "$entry" "$NOW" "$end" "$model" "$funding" \
