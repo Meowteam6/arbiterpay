@@ -3,12 +3,9 @@
 import { useState } from "react";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
-import { decodeEventLog } from "viem";
 import { DYNAMIC_CONFIGURED } from "@/lib/config";
 import {
-  getArcPublicClient,
   getHealthPoolsAddress,
-  healthPoolsAbi,
   parseUsdc,
   withDocMarker,
   type EvidenceType,
@@ -16,6 +13,7 @@ import {
 import { useEmbeddedWallet } from "@/lib/wallet";
 import { useUsdcDeposit } from "@/lib/useUsdcDeposit";
 import { isEconomicallyDeadConfig } from "@/lib/pool-lifecycle";
+import { resolveNewPoolId } from "@/lib/resolve-pool-id";
 import { ArcTxLink, ErrorNote } from "@/components/ui";
 
 const DURATION_OPTIONS: { label: string; days: number }[] = [
@@ -69,43 +67,6 @@ const DOC_TEMPLATES: DocTemplate[] = [
     funding: "25.00",
   },
 ];
-
-/**
- * Read the new pool id out of the createPool receipt by decoding the
- * PoolCreated event. Falls back to the post-tx poolCount (ids run 1..count)
- * if the log cannot be decoded so the redirect still lands somewhere useful.
- */
-async function resolveNewPoolId(depositHash: `0x${string}`): Promise<bigint> {
-  const address = getHealthPoolsAddress();
-  if (address === null) {
-    throw new Error("HealthPools contract address is not configured.");
-  }
-  const client = getArcPublicClient();
-  const receipt = await client.getTransactionReceipt({ hash: depositHash });
-
-  for (const log of receipt.logs) {
-    if (log.address.toLowerCase() !== address.toLowerCase()) continue;
-    try {
-      const decoded = decodeEventLog({
-        abi: healthPoolsAbi,
-        data: log.data,
-        topics: log.topics,
-      });
-      if (decoded.eventName === "PoolCreated") {
-        return decoded.args.poolId;
-      }
-    } catch {
-      // Not the event we want; keep scanning.
-    }
-  }
-
-  const count = await client.readContract({
-    address,
-    abi: healthPoolsAbi,
-    functionName: "poolCount",
-  });
-  return count;
-}
 
 function CreatePoolInner() {
   const router = useRouter();

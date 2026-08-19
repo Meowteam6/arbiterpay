@@ -151,12 +151,20 @@ export default function PoolsPage() {
             no real value.
           </p>
         </div>
-        <Link
-          href="/pools/create"
-          className={`rounded-xl bg-accent-strong font-semibold text-background hover:bg-accent ${TAP_TARGET}`}
-        >
-          Create pool
-        </Link>
+        <div className="flex flex-wrap gap-2">
+          <Link
+            href="/challenge/new"
+            className={`rounded-xl border border-accent/50 bg-accent-deep/30 font-semibold text-accent hover:bg-accent-deep/50 ${TAP_TARGET}`}
+          >
+            Challenge a friend
+          </Link>
+          <Link
+            href="/pools/create"
+            className={`rounded-xl bg-accent-strong font-semibold text-background hover:bg-accent ${TAP_TARGET}`}
+          >
+            Create pool
+          </Link>
+        </div>
       </div>
 
       {poolsQuery.isLoading ? (

@@ -44,6 +44,19 @@ export default function Home() {
           </p>
         </div>
         <GoalIntent />
+        <div className="mt-6">
+          <Link
+            href="/challenge/new"
+            className="inline-flex items-center gap-2 rounded-xl border border-accent/50 bg-accent-deep/30 px-6 py-3 text-sm font-semibold text-accent hover:bg-accent-deep/50"
+          >
+            or dare a friend and put money on it
+            <span aria-hidden="true">-&gt;</span>
+          </Link>
+          <p className="mx-auto mt-2 max-w-md text-xs text-muted">
+            You fund the reward, they hit the goal, they get paid. They flake,
+            you get it back. Their health data stays private the whole way.
+          </p>
+        </div>
         <div className="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
           <Link
             href="/pools"
