@@ -94,6 +94,17 @@ export function checkMessage(raw: string | null | undefined): MessageCheck {
   return { ok: true, message: trimmed };
 }
 
+/**
+ * Canonicalize a target handle the same way on both sides of the invite:
+ * strip a leading @ (people type it), lowercase, trim. The create form stores
+ * this canonical form and getChallengesForTargetHandle matches on it, so the
+ * recipient's own claimed handle (already lowercase [a-z0-9_]) lines up exactly
+ * with what the challenger aimed at. Blank stays blank.
+ */
+export function normalizeTargetHandle(raw: string): string {
+  return raw.trim().replace(/^@+/, "").trim().toLowerCase();
+}
+
 export type TargetHandleCheck =
   | { ok: true; targetHandle: string | null }
   | { ok: false; reason: string };

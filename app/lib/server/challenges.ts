@@ -22,6 +22,7 @@ import {
   checkTargetHandle,
   generateInviteToken,
   isValidInviteToken,
+  normalizeTargetHandle,
 } from "@/lib/challenges";
 import { normalizeAddress } from "@/lib/social";
 
@@ -81,6 +82,58 @@ export async function getChallengeByToken(
 
   if (error !== null || data === null) return null;
   return rowToChallenge(data);
+}
+
+/** One dare aimed at a handle: enough to render an "Invited to you" card and to
+ *  hand the recipient the token that unlocks the goal on the /c/[token] landing.
+ *  The goal text is NOT here - it is read live from the pool on-chain. */
+export interface InvitedChallenge {
+  poolId: string; // decimal string
+  inviteToken: string;
+  challengerAddress: string;
+  message: string | null;
+}
+
+/**
+ * Every challenge aimed at `rawHandle`, for the "Invited to you" section.
+ *
+ * PRIVACY: the invite token is a capability - possession of it reveals the
+ * health-adjacent goal on the landing. This service-role read is only ever
+ * reached AFTER a route has verified an EIP-191 signature proving the caller
+ * controls the address that claimed this exact handle, so the tokens go to the
+ * one wallet entitled to them and never to anyone who merely knows the handle.
+ *
+ * Matching is by canonical handle string. The create form stores the target
+ * normalized (leading @ stripped, lowercased) and a claimed handle is already
+ * lowercase [a-z0-9_], so the two are equal on the canonical form - equality on
+ * that form IS the case-insensitive match. The @-prefixed variant is included
+ * as a defensive catch for any row stored with the @ still on it; both use
+ * equality (never LIKE) so a handle's underscore is never treated as a wildcard.
+ * Free-text legacy labels ("my brother") simply never equal a real handle and
+ * so never surface, which is the intended fallback.
+ */
+export async function getChallengesForTargetHandle(
+  rawHandle: string,
+): Promise<InvitedChallenge[]> {
+  const handle = normalizeTargetHandle(rawHandle);
+  if (handle === "") return [];
+  const supabase = getSupabaseServiceRole();
+  if (supabase === null) return [];
+
+  const { data, error } = await supabase
+    .from(CHALLENGES_TABLE)
+    .select(
+      "invite_token, pool_id, challenger_address, target_handle, message, created_at",
+    )
+    .in("target_handle", [handle, `@${handle}`]);
+
+  if (error !== null || data === null) return [];
+  return (data as ChallengeRow[]).map((row) => ({
+    poolId: String(row.pool_id),
+    inviteToken: row.invite_token,
+    challengerAddress: row.challenger_address,
+    message: row.message,
+  }));
 }
 
 export type CreateChallengeResult =

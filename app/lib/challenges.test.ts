@@ -9,6 +9,7 @@ import {
   isValidInviteToken,
   checkMessage,
   checkTargetHandle,
+  normalizeTargetHandle,
   challengeShareUrl,
 } from "@/lib/challenges";
 
@@ -96,6 +97,26 @@ describe("checkTargetHandle", () => {
   it("rejects a label over the column length", () => {
     const result = checkTargetHandle("x".repeat(TARGET_HANDLE_MAX + 1));
     expect(result.ok).toBe(false);
+  });
+});
+
+describe("normalizeTargetHandle", () => {
+  it("strips a leading @, lowercases, and trims", () => {
+    expect(normalizeTargetHandle("@Nikki")).toBe("nikki");
+    expect(normalizeTargetHandle("  @NIKKI_HU  ")).toBe("nikki_hu");
+    expect(normalizeTargetHandle("nikki")).toBe("nikki");
+  });
+
+  it("matches what a claimed handle canonicalizes to, so the two line up", () => {
+    // A profile stores handles lowercased [a-z0-9_]; the challenger may type the
+    // @ and any case. Both sides must land on the identical string.
+    expect(normalizeTargetHandle("@Coach_Maya")).toBe("coach_maya");
+  });
+
+  it("collapses a blank or lone @ to the empty string (no target)", () => {
+    expect(normalizeTargetHandle("")).toBe("");
+    expect(normalizeTargetHandle("   ")).toBe("");
+    expect(normalizeTargetHandle("@")).toBe("");
   });
 });
 

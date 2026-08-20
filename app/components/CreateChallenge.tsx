@@ -35,6 +35,7 @@ import {
   challengeShareUrl,
   checkMessage,
   checkTargetHandle,
+  normalizeTargetHandle,
   MESSAGE_MAX,
   TARGET_HANDLE_MAX,
 } from "@/lib/challenges";
@@ -152,7 +153,10 @@ function CreateChallengeInner() {
       setFormError(messageCheck.reason);
       return;
     }
-    const targetCheck = checkTargetHandle(target);
+    // Canonicalize the recipient to a real @handle (strip @, lowercase) so it
+    // matches what they claimed and surfaces under "Invited to you". Blank stays
+    // blank and the flow is unchanged - the link is still shareable to anyone.
+    const targetCheck = checkTargetHandle(normalizeTargetHandle(target));
     if (!targetCheck.ok) {
       setFormError(targetCheck.reason);
       return;
@@ -391,15 +395,15 @@ function CreateChallengeInner() {
           Who is it for (optional)
           <input
             type="text"
-            placeholder="my brother"
+            placeholder="@handle"
             value={target}
             maxLength={TARGET_HANDLE_MAX}
             onChange={(e) => setTarget(e.target.value)}
             className="mt-1 w-full rounded-xl border border-edge bg-surface-raised px-3 py-3 text-base"
           />
           <span className="mt-1 block text-xs text-muted">
-            Just a label so you remember who you sent it to. Only shown on the
-            link, never made public.
+            Enter their @handle and they will see this under Invited to you in
+            the app. Leave blank to just share the link. Never made public.
           </span>
         </label>
 

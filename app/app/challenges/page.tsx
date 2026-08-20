@@ -21,6 +21,15 @@
 // which strips the [doc] marker). Nothing health-adjacent is read from any
 // off-chain source.
 //
+// INVITED TO YOU is the one section that starts off-chain. A challenger can aim
+// a dare at your @handle at creation; that (handle -> invite token) row is the
+// only place the aim is recorded. /api/challenges/invited returns those invites
+// ONLY to the signature-verified owner of the handle, so the token - a
+// capability that unlocks the goal - never reaches anyone else. Everything shown
+// on the card is then read the same reliable way as the rest of the page:
+// fetchPool (an eth_call) for the goal, reward and window, fetchParticipant to
+// drop any dare you have already accepted. Still no getLogs.
+//
 // PRIVACY. The dare is health-adjacent, but this is the participant's and the
 // creator's OWN challenges page - they are entitled to see their own goal text.
 // The public redaction rule (feed / profile / pool metadata) is untouched.
@@ -43,12 +52,16 @@ import {
   displayGoalSpec,
   fetchParticipant,
   fetchParticipants,
+  fetchPool,
   fetchPools,
   formatUsdc,
   type ParticipantInfo,
   type PoolInfo,
 } from "@/lib/contract";
+import { challengeShareUrl } from "@/lib/challenges";
+import { fetchWithWalletAuth, type WalletAuthRequester } from "@/lib/client-auth";
 import { useEmbeddedWallet } from "@/lib/wallet";
+import { useWalletAuth } from "@/lib/useWalletAuth";
 import { useDisplayNames } from "@/lib/use-display-names";
 
 /** The on-chain initiative string every challenge pool carries. Mirrors
@@ -69,6 +82,22 @@ interface SentChallenge {
 interface MyChallenges {
   inChallenges: InChallenge[];
   sentChallenges: SentChallenge[];
+}
+
+/** The invite row the signed route returns, before the on-chain pool read. */
+interface RawInvite {
+  poolId: string;
+  inviteToken: string;
+  challengerAddress: string;
+  message: string | null;
+}
+
+/** A dare aimed at you that you have NOT yet accepted, resolved against chain. */
+interface InvitedChallenge {
+  pool: PoolInfo;
+  inviteToken: string;
+  challengerAddress: string;
+  message: string | null;
 }
 
 function sameAddress(a: string, b: string): boolean {
@@ -126,6 +155,68 @@ async function fetchMyChallenges(
   return { inChallenges, sentChallenges };
 }
 
+/**
+ * The dares aimed at your handle that you have not yet accepted.
+ *
+ * The invite list itself is signature-gated (only the handle's owner may read
+ * its tokens), so this asks /api/challenges/invited with the wallet proof
+ * attached. Everything after that is the page's usual reliable read: one
+ * fetchPool per invite for the goal / reward / window, one fetchParticipant to
+ * drop anything already joined (that belongs in "Challenges you're in"). No
+ * getLogs. Best-effort by design: an unsigned or failed response yields an empty
+ * list so the additive section simply stays hidden rather than erroring the page.
+ */
+async function fetchInvitedChallenges(
+  address: `0x${string}`,
+  requestAuth: WalletAuthRequester,
+): Promise<InvitedChallenge[]> {
+  const { response, auth } = await fetchWithWalletAuth(
+    "/api/challenges/invited",
+    {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ address }),
+    },
+    requestAuth,
+  );
+  // The tokens are private to the handle owner: without an attached signature
+  // there is nothing to show, and a non-ok response is not worth erroring over.
+  if (auth.kind !== "ok" || !response.ok) return [];
+
+  const body = (await response.json().catch(() => ({}))) as {
+    invites?: RawInvite[];
+  };
+  const raw = body.invites ?? [];
+
+  const resolved = await Promise.all(
+    raw.map(async (invite): Promise<InvitedChallenge | null> => {
+      let poolId: bigint;
+      try {
+        poolId = BigInt(invite.poolId);
+      } catch {
+        return null;
+      }
+      try {
+        const pool = await fetchPool(poolId);
+        const participant = await fetchParticipant(poolId, address);
+        // Already accepted -> it lives in "Challenges you're in", not here.
+        if (participant.joined) return null;
+        return {
+          pool,
+          inviteToken: invite.inviteToken,
+          challengerAddress: invite.challengerAddress,
+          message: invite.message,
+        };
+      } catch {
+        // An unreadable pool is dropped rather than shown as a broken card.
+        return null;
+      }
+    }),
+  );
+
+  return resolved.filter((entry): entry is InvitedChallenge => entry !== null);
+}
+
 /** The participant's standing on a challenge they are in, read from the chain
  *  alone: recorded + verdict + settled is all it takes to say where the money
  *  is. Labels match the page's stated set (Not started / awaiting settle / Paid)
@@ -143,6 +234,49 @@ function challengeStatus(
     return { label: "Goal missed", tone: "muted" };
   }
   return { label: "Not started", tone: "warning" };
+}
+
+function InvitedChallengeCard({
+  entry,
+  challengerName,
+  acceptUrl,
+}: {
+  entry: InvitedChallenge;
+  challengerName: string;
+  acceptUrl: string;
+}) {
+  const { pool, message } = entry;
+
+  return (
+    <div className="rounded-2xl border border-accent/40 bg-surface p-5">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <Badge>Challenge</Badge>
+        <Badge tone="accent">Invited</Badge>
+      </div>
+      <p className="mt-3 text-sm text-muted">
+        <span className="font-semibold text-foreground">{challengerName}</span>{" "}
+        invited you
+      </p>
+      <h3 className="mt-1 text-lg font-semibold leading-snug">
+        {displayGoalSpec(pool.goalSpec)}
+      </h3>
+      {message !== null ? (
+        <p className="mt-2 text-sm italic text-muted">{message}</p>
+      ) : null}
+      <div className="mt-3 flex flex-wrap items-center gap-x-6 gap-y-1 text-sm text-muted">
+        <span>
+          Reward <Money usd={formatUsdc(pool.balance)} size="sm" />
+        </span>
+        <Countdown periodStart={pool.periodStart} periodEnd={pool.periodEnd} />
+      </div>
+      <Link
+        href={acceptUrl}
+        className={`mt-4 w-full rounded-xl bg-accent-strong font-semibold text-background hover:bg-accent ${TAP_TARGET}`}
+      >
+        Accept the dare
+      </Link>
+    </div>
+  );
 }
 
 function InChallengeCard({
@@ -242,6 +376,7 @@ function DareAFriend() {
 
 function MyChallengesContent() {
   const { ready, authenticated, address } = useEmbeddedWallet();
+  const requestAuth = useWalletAuth();
 
   const query = useQuery({
     queryKey: ["my-challenges", address],
@@ -252,13 +387,32 @@ function MyChallengesContent() {
     enabled: address !== null,
   });
 
-  // Resolve challengers to @handles for the "in" cards. A stable, deduped array
-  // keeps the resolver's query key from churning on every render.
-  const creatorAddresses = useMemo(
-    () => (query.data?.inChallenges ?? []).map((entry) => entry.pool.creator),
-    [query.data],
+  // The dares aimed at your handle. Signature-gated, so it is cached on the
+  // address: the embedded wallet signs once and the credential is reused rather
+  // than re-signing every render.
+  const invitedQuery = useQuery({
+    queryKey: ["invited-challenges", address],
+    queryFn: () => {
+      if (address === null) throw new Error("No wallet address.");
+      return fetchInvitedChallenges(address, requestAuth);
+    },
+    enabled: address !== null,
+  });
+
+  // Resolve challengers to @handles for the "in" and "invited" cards. A stable,
+  // deduped array keeps the resolver's query key from churning on every render;
+  // useDisplayNames normalizes and dedupes the two sources internally.
+  const nameAddresses = useMemo(
+    () => [
+      ...(query.data?.inChallenges ?? []).map((entry) => entry.pool.creator),
+      ...(invitedQuery.data ?? []).map((entry) => entry.challengerAddress),
+    ],
+    [query.data, invitedQuery.data],
   );
-  const { displayName } = useDisplayNames(creatorAddresses);
+  const { displayName } = useDisplayNames(nameAddresses);
+
+  const origin =
+    typeof window === "undefined" ? "" : window.location.origin;
 
   if (!ready) {
     return (
@@ -312,8 +466,22 @@ function MyChallengesContent() {
   }
 
   const data = query.data ?? { inChallenges: [], sentChallenges: [] };
+  const invited = invitedQuery.data ?? [];
   const nothing =
-    data.inChallenges.length === 0 && data.sentChallenges.length === 0;
+    data.inChallenges.length === 0 &&
+    data.sentChallenges.length === 0 &&
+    invited.length === 0;
+
+  // A freshly-invited user has no sent or joined challenges, so hold the empty
+  // state until the (signature-gated) invited read settles - otherwise the page
+  // flashes "No challenges yet" and then pops an invite in above it.
+  if (nothing && invitedQuery.isLoading) {
+    return (
+      <div className="space-y-4">
+        <Skeleton className="h-28" />
+      </div>
+    );
+  }
 
   if (nothing) {
     return (
@@ -327,6 +495,27 @@ function MyChallengesContent() {
 
   return (
     <div className="space-y-8">
+      {invited.length > 0 ? (
+        <section className="space-y-4">
+          <div>
+            <h2 className="text-lg font-semibold">Invited to you</h2>
+            <p className="mt-1 text-sm text-muted">
+              Dares aimed straight at your handle. Accept one and go for the
+              goal - you pay nothing, and the reward pays the second it is
+              verified.
+            </p>
+          </div>
+          {invited.map((entry) => (
+            <InvitedChallengeCard
+              key={entry.inviteToken}
+              entry={entry}
+              challengerName={displayName(entry.challengerAddress)}
+              acceptUrl={challengeShareUrl(origin, entry.inviteToken)}
+            />
+          ))}
+        </section>
+      ) : null}
+
       <section className="space-y-4">
         <div>
           <h2 className="text-lg font-semibold">Challenges you&apos;re in</h2>
