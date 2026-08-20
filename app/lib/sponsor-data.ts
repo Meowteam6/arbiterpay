@@ -76,43 +76,58 @@ export async function fetchPoolEventTotals(): Promise<
   if (address === null) throw new ContractNotConfiguredError();
   const client = getArcPublicClient();
 
-  const latest = await client.getBlockNumber();
-  const logs = await scanInWindows(poolsScanFromBlock(), latest, (fromBlock, toBlock) =>
-    client.getLogs({
-      address,
-      events: [
-        poolJoinedEvent,
-        resultRecordedEvent,
-        poolFundedEvent,
-        achieverPaidEvent,
-      ],
-      fromBlock,
-      toBlock,
-    }),
-  );
+  // Historical event scanning is unreliable from the browser: the primary Arc
+  // RPC prunes deploy-era history and the archival one caps eth_getLogs well
+  // below a full scan and rate-limits bursts. So this aggregation degrades
+  // gracefully - if the scan cannot complete, the console still lists the
+  // sponsor's pools (from the poolCount read) with outcomes shown as pending,
+  // rather than failing the whole page. A server-side archival scan is the
+  // durable fix and is tracked separately.
+  try {
+    const latest = await client.getBlockNumber();
+    const logs = await scanInWindows(poolsScanFromBlock(), latest, (fromBlock, toBlock) =>
+      client.getLogs({
+        address,
+        events: [
+          poolJoinedEvent,
+          resultRecordedEvent,
+          poolFundedEvent,
+          achieverPaidEvent,
+        ],
+        fromBlock,
+        toBlock,
+      }),
+    );
 
-  const map = new Map<string, PoolEventTotals>();
-  for (const log of logs) {
-    const poolId = log.args.poolId;
-    if (poolId === undefined) continue;
-    const totals = totalsFor(map, poolId);
-    switch (log.eventName) {
-      case "PoolJoined":
-        totals.joined += 1;
-        break;
-      case "ResultRecorded":
-        if (log.args.verdict === true) totals.completions += 1;
-        break;
-      case "PoolFunded":
-        totals.toppedUpUsdc += log.args.amount ?? 0n;
-        break;
-      case "AchieverPaid":
-        totals.paidUsdc += log.args.amount ?? 0n;
-        break;
+    const map = new Map<string, PoolEventTotals>();
+    for (const log of logs) {
+      const poolId = log.args.poolId;
+      if (poolId === undefined) continue;
+      const totals = totalsFor(map, poolId);
+      switch (log.eventName) {
+        case "PoolJoined":
+          totals.joined += 1;
+          break;
+        case "ResultRecorded":
+          if (log.args.verdict === true) totals.completions += 1;
+          break;
+        case "PoolFunded":
+          totals.toppedUpUsdc += log.args.amount ?? 0n;
+          break;
+        case "AchieverPaid":
+          totals.paidUsdc += log.args.amount ?? 0n;
+          break;
+      }
     }
-  }
 
-  return Object.fromEntries(map);
+    return Object.fromEntries(map);
+  } catch (err) {
+    console.warn(
+      "[sponsor] pool-event scan unavailable from this RPC; showing pools without live outcomes",
+      err,
+    );
+    return {};
+  }
 }
 
 /** The pool-state fields the console pairs with the event totals. */
