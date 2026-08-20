@@ -7,10 +7,12 @@
 // COUNTS and USDC SUMS keyed by pool id and discards the identities. The
 // k-anonymity floor is then applied downstream in lib/sponsor-metrics.
 //
-// One getLogs call covers all four event types across the whole contract, then
-// the rows are grouped by pool id. That is one round trip for the entire
-// console rather than one per pool, and it reuses the same Arc public client
-// (and RPC fallback) as the rest of the read path.
+// A windowed getLogs scan covers all four event types across the contract's
+// history, then the rows are grouped by pool id. Arc caps a single eth_getLogs
+// at 100k blocks and runs sub-second blocks, so the scan is split into windows
+// from the pinned deploy-era start block to the chain tip (see chunked-logs).
+// It reuses the same Arc public client (and RPC fallback) as the rest of the
+// read path.
 
 import { parseAbiItem, type Address } from "viem";
 import {
@@ -18,6 +20,7 @@ import {
   getHealthPoolsAddress,
   ContractNotConfiguredError,
 } from "@/lib/contract";
+import { scanInWindows, poolsScanFromBlock } from "@/lib/server/chunked-logs";
 import type { PoolAggregate } from "@/lib/sponsor-metrics";
 
 const poolJoinedEvent = parseAbiItem(
@@ -73,17 +76,20 @@ export async function fetchPoolEventTotals(): Promise<
   if (address === null) throw new ContractNotConfiguredError();
   const client = getArcPublicClient();
 
-  const logs = await client.getLogs({
-    address,
-    events: [
-      poolJoinedEvent,
-      resultRecordedEvent,
-      poolFundedEvent,
-      achieverPaidEvent,
-    ],
-    fromBlock: 0n,
-    toBlock: "latest",
-  });
+  const latest = await client.getBlockNumber();
+  const logs = await scanInWindows(poolsScanFromBlock(), latest, (fromBlock, toBlock) =>
+    client.getLogs({
+      address,
+      events: [
+        poolJoinedEvent,
+        resultRecordedEvent,
+        poolFundedEvent,
+        achieverPaidEvent,
+      ],
+      fromBlock,
+      toBlock,
+    }),
+  );
 
   const map = new Map<string, PoolEventTotals>();
   for (const log of logs) {
