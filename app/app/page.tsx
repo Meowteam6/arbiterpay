@@ -43,6 +43,17 @@ export default function Home() {
             you real money.
           </p>
         </div>
+        <p className="mx-auto mt-3 max-w-xl text-xs leading-relaxed text-muted">
+          Testnet demo, play-money USDC. Not medical or financial advice. See{" "}
+          <Link href="/privacy" className="underline hover:text-foreground">
+            Privacy
+          </Link>{" "}
+          and{" "}
+          <Link href="/terms" className="underline hover:text-foreground">
+            Terms
+          </Link>
+          .
+        </p>
         <GoalIntent />
         <div className="mt-6">
           <Link

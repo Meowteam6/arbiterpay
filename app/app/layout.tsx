@@ -1,4 +1,5 @@
 import type { Metadata, Viewport } from "next";
+import Link from "next/link";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import Providers from "./providers";
@@ -43,8 +44,18 @@ export default function RootLayout({
             {children}
           </main>
           <footer className="border-t border-edge px-4 py-6 text-center text-xs text-muted">
-            GoHealthMe — settled by SPOTTER on Arc testnet. Your health data
-            never touches the chain.
+            <p>
+              GoHealthMe — settled by SPOTTER on Arc testnet. Your health data
+              never touches the chain.
+            </p>
+            <nav className="mt-2 flex items-center justify-center gap-4">
+              <Link href="/privacy" className="hover:text-foreground hover:underline">
+                Privacy
+              </Link>
+              <Link href="/terms" className="hover:text-foreground hover:underline">
+                Terms
+              </Link>
+            </nav>
           </footer>
           <HelperWidget />
         </Providers>
