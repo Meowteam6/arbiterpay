@@ -7,8 +7,32 @@ import { DynamicWagmiConnector } from "@dynamic-labs/wagmi-connector";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { WagmiProvider, createConfig, fallback, http } from "wagmi";
 import { arcTestnet } from "@/lib/chains";
-import { DEMO_CHROME } from "@/lib/config";
+import { DEMO_CHROME, GUARD_INJECTED_WALLET } from "@/lib/config";
 import { arcEvmNetwork } from "@/lib/dynamic";
+import { externalConnectIntended } from "@/lib/wallet-connect-intent";
+
+// Optional guard against a browser wallet silently hijacking the session.
+// walletsFilter hides MetaMask from the modal LIST but does not stop Dynamic
+// from auto-reconnecting an already-approved injected wallet on page load; that
+// reconnect lands in userWallets and becomes the session. handleConnectedWallet
+// fires on both an explicit connect and a load-time reconnect (returning false
+// disconnects), so this vetoes a non-embedded connection unless the embedded
+// wallet is connecting or the user deliberately tapped "Connect your own wallet"
+// (see lib/wallet-connect-intent.ts). The embedded email wallet always passes.
+//
+// Spread in ONLY when GUARD_INJECTED_WALLET is set, so the default build's
+// settings object is unchanged and sign-in cannot regress from this.
+const injectedWalletGuard = GUARD_INJECTED_WALLET
+  ? {
+      handlers: {
+        handleConnectedWallet: async (wallet: {
+          connector?: { isEmbeddedWallet?: boolean };
+        }): Promise<boolean> =>
+          Boolean(wallet.connector?.isEmbeddedWallet) ||
+          externalConnectIntended(),
+      },
+    }
+  : {};
 
 // Arc-only. Sepolia was removed with the dropped ENS work — its unreachable
 // default RPC was timing out in the wallet connector (UnknownRpcError).
@@ -107,6 +131,8 @@ export default function Providers({ children }: { children: ReactNode }) {
         // popup each time. (External wallets like MetaMask still show their
         // own native prompt, which Dynamic can't suppress.)
         transactionConfirmation: { required: false },
+        // Inert unless NEXT_PUBLIC_GUARD_INJECTED_WALLET is set (see above).
+        ...injectedWalletGuard,
       }}
     >
       <WagmiProvider config={wagmiConfig}>

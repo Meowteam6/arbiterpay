@@ -23,6 +23,15 @@ export interface EmbeddedWalletState {
   ready: boolean;
   authenticated: boolean;
   address: Address | null;
+  /**
+   * True when the active wallet is the Dynamic-provisioned embedded wallet
+   * (email sign-in, no seed phrase, no extension); false when it is an external
+   * wallet the user connected themselves; null when no wallet is resolved yet.
+   * Read straight off the connector, the same signal the SDK uses internally.
+   */
+  isEmbedded: boolean | null;
+  /** The active wallet's connector name (for example "MetaMask"), or null. */
+  connectorName: string | null;
   login: () => void;
   logout: () => Promise<void>;
   getArcWalletClient: () => Promise<ArcWalletClient>;
@@ -39,6 +48,8 @@ function useStubWallet(): EmbeddedWalletState {
     ready: true,
     authenticated: false,
     address: null,
+    isEmbedded: null,
+    connectorName: null,
     login: () => {
       console.warn(
         "Dynamic is not configured (NEXT_PUBLIC_DYNAMIC_ENVIRONMENT_ID unset); sign-in is unavailable.",
@@ -81,6 +92,13 @@ function useDynamicWallet(): EmbeddedWalletState {
       ? (activeWallet.address as Address)
       : null;
 
+  // isEmbeddedWallet lives on the connector; it is the same boolean the SDK's
+  // own isEmbeddedConnector() reads. Null until a wallet resolves so the UI can
+  // tell "still loading" apart from "external".
+  const connector = activeWallet?.connector ?? null;
+  const isEmbedded = connector !== null ? Boolean(connector.isEmbeddedWallet) : null;
+  const connectorName = connector?.name ?? null;
+
   const getArcWalletClient = useCallback(async (): Promise<ArcWalletClient> => {
     if (activeWallet == null || !isEthereumWallet(activeWallet)) {
       throw new Error("No EVM wallet connected. Sign in first.");
@@ -96,6 +114,8 @@ function useDynamicWallet(): EmbeddedWalletState {
     // a connected wallet address — so treat a connected wallet as authenticated.
     authenticated: isLoggedIn || address !== null,
     address,
+    isEmbedded,
+    connectorName,
     login: () => setShowAuthFlow(true),
     logout: handleLogOut,
     getArcWalletClient,

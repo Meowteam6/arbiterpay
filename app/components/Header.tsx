@@ -18,6 +18,7 @@ const NAV_ITEMS: { href: string; label: string }[] = [
   { href: "/agent", label: "SPOTTER" },
   { href: "/sponsor", label: "Sponsor" },
   { href: "/dashboard", label: "Dashboard" },
+  { href: "/settings", label: "Wallet" },
 ];
 
 function isActive(pathname: string, href: string): boolean {

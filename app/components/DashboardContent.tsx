@@ -25,6 +25,7 @@ import { useState } from "react";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import BalanceCard from "@/components/BalanceCard";
 import Countdown from "@/components/Countdown";
+import SignInPanel from "@/components/SignInPanel";
 import { Badge, EmptyState, ErrorNote, Skeleton, TAP_TARGET } from "@/components/ui";
 import {
   displayGoalSpec,
@@ -373,7 +374,7 @@ function RecentDataCard({ address }: { address: `0x${string}` }) {
 }
 
 export default function DashboardContent() {
-  const { ready, authenticated, address, login } = useEmbeddedWallet();
+  const { ready, authenticated, address } = useEmbeddedWallet();
   const requestAuth = useWalletAuth();
 
   const joinedQuery = useQuery({
@@ -410,20 +411,21 @@ export default function DashboardContent() {
   }
 
   if (!authenticated || address === null) {
+    // The email-first panel is the default path (we make the wallet); an
+    // external wallet is the deliberate second choice inside it. Replacing the
+    // bare login() button here means a first-time visitor never has to guess
+    // what "Sign in" will pop up.
     return (
-      <EmptyState
-        title="Sign in to see your goals"
-        detail="Your joined pools, streak progress, and payouts live here once you sign in."
-        action={
-          <button
-            type="button"
-            onClick={login}
-            className="rounded-xl bg-accent-strong px-6 py-3 text-sm font-semibold text-background hover:bg-accent"
-          >
-            Sign in
-          </button>
-        }
-      />
+      <div className="mx-auto max-w-md space-y-4">
+        <div className="text-center">
+          <p className="text-lg font-semibold">Sign in to see your goals</p>
+          <p className="mx-auto mt-2 max-w-md text-sm text-muted">
+            Your joined pools, streak progress, and payouts live here once you
+            sign in.
+          </p>
+        </div>
+        <SignInPanel />
+      </div>
     );
   }
 
