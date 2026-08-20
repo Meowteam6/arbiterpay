@@ -8,7 +8,8 @@
 /** Under Arc's 100k eth_getLogs window. */
 const RANGE = 90_000n;
 
-/** Windows run in bounded-concurrency batches to stay under the RPC rate limit. */
+/** Default window batch size. A caller running several scans at once passes a
+ *  lower value so their combined peak stays under the RPC rate limit. */
 const CONCURRENCY = 6;
 
 /**
@@ -34,16 +35,18 @@ export async function scanInWindows<T>(
   fromBlock: bigint,
   toBlock: bigint,
   query: (fromBlock: bigint, toBlock: bigint) => Promise<T[]>,
+  concurrency: number = CONCURRENCY,
 ): Promise<T[]> {
   if (toBlock < fromBlock) return [];
+  const batchSize = concurrency < 1 ? 1 : concurrency;
   const windows: Array<[bigint, bigint]> = [];
   for (let from = fromBlock; from <= toBlock; from += RANGE) {
     const to = from + RANGE - 1n > toBlock ? toBlock : from + RANGE - 1n;
     windows.push([from, to]);
   }
   const out: T[] = [];
-  for (let i = 0; i < windows.length; i += CONCURRENCY) {
-    const batch = windows.slice(i, i + CONCURRENCY);
+  for (let i = 0; i < windows.length; i += batchSize) {
+    const batch = windows.slice(i, i + batchSize);
     const results = await Promise.all(batch.map(([f, t]) => query(f, t)));
     for (const r of results) out.push(...r);
   }

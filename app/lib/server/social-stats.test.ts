@@ -68,6 +68,9 @@ const fakeClient = {
     },
   ),
   getBlock: vi.fn(async () => ({ timestamp: 1_790_000_000n })),
+  // One window covers the whole pinned range below, so each event query is a
+  // single getLogs call and the canned logs are not repeated across windows.
+  getBlockNumber: vi.fn(async () => 50n),
 };
 
 vi.mock("@/lib/contract", () => ({
@@ -86,6 +89,8 @@ const { getSocialStats, clearSocialStatsCache } = await import(
 );
 
 beforeEach(() => {
+  // Pin the scan start so [start, getBlockNumber()] is a single 90k window.
+  process.env.HEALTH_POOLS_FROM_BLOCK = "0";
   clearSocialStatsCache();
   vi.clearAllMocks();
 });

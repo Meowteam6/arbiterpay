@@ -30,6 +30,7 @@ import {
   resultRecordedEvent,
 } from "@/lib/contract";
 import { normalizeAddress } from "@/lib/social";
+import { scanInWindows, poolsScanFromBlock } from "@/lib/server/chunked-logs";
 
 export interface SocialWin {
   /** ISO-8601 block time, or "" when the block time could not be read. */
@@ -65,14 +66,11 @@ export const EMPTY_STATS: SocialStats = {
 // are fetched one block at a time, so the cap also bounds that fan-out.
 const WINS_LIMIT = 12;
 
-// Where the log scan starts. The contract is young, so a full scan from 0 is
-// correct and matches fetchPools(); an operator can pin a later block once the
-// history grows past what a single getLogs call should carry.
-function fromBlock(): bigint {
-  const raw = process.env.SOCIAL_STATS_FROM_BLOCK ?? "";
-  if (/^\d+$/.test(raw)) return BigInt(raw);
-  return 0n;
-}
+// Each event query is windowed (Arc caps a single getLogs at 100k blocks and
+// runs sub-second blocks) via scanInWindows from the pinned deploy-era start.
+// The six per-wallet scans run at once, so each uses a small window concurrency
+// to keep their combined peak under the RPC rate limit.
+const SCAN_CONCURRENCY = 2;
 
 const CACHE_TTL_MS = 30_000;
 const cache = new Map<string, { at: number; stats: SocialStats }>();
@@ -154,53 +152,69 @@ export async function getSocialStats(rawAddress: string): Promise<SocialStats> {
   if (poolsAddress === null) return EMPTY_STATS;
   const account = getAddress(lower) as Address;
   const client = getArcPublicClient();
-  const start = fromBlock();
+  const start = poolsScanFromBlock();
 
   try {
+    const latest = await client.getBlockNumber();
+    const scan = <T>(
+      query: (fromBlock: bigint, toBlock: bigint) => Promise<T[]>,
+    ) => scanInWindows(start, latest, query, SCAN_CONCURRENCY);
     const [achiever, backerPaid, joined, results, backedForMe, backedByMe] =
       await Promise.all([
-        client.getLogs({
-          address: poolsAddress,
-          event: achieverPaidEvent,
-          args: { participant: account },
-          fromBlock: start,
-          toBlock: "latest",
-        }),
-        client.getLogs({
-          address: poolsAddress,
-          event: backerPaidEvent,
-          args: { backer: account },
-          fromBlock: start,
-          toBlock: "latest",
-        }),
-        client.getLogs({
-          address: poolsAddress,
-          event: poolJoinedEvent,
-          args: { participant: account },
-          fromBlock: start,
-          toBlock: "latest",
-        }),
-        client.getLogs({
-          address: poolsAddress,
-          event: resultRecordedEvent,
-          args: { participant: account },
-          fromBlock: start,
-          toBlock: "latest",
-        }),
-        client.getLogs({
-          address: poolsAddress,
-          event: goalBackedEvent,
-          args: { participant: account },
-          fromBlock: start,
-          toBlock: "latest",
-        }),
-        client.getLogs({
-          address: poolsAddress,
-          event: goalBackedEvent,
-          args: { backer: account },
-          fromBlock: start,
-          toBlock: "latest",
-        }),
+        scan((fromBlock, toBlock) =>
+          client.getLogs({
+            address: poolsAddress,
+            event: achieverPaidEvent,
+            args: { participant: account },
+            fromBlock,
+            toBlock,
+          }),
+        ),
+        scan((fromBlock, toBlock) =>
+          client.getLogs({
+            address: poolsAddress,
+            event: backerPaidEvent,
+            args: { backer: account },
+            fromBlock,
+            toBlock,
+          }),
+        ),
+        scan((fromBlock, toBlock) =>
+          client.getLogs({
+            address: poolsAddress,
+            event: poolJoinedEvent,
+            args: { participant: account },
+            fromBlock,
+            toBlock,
+          }),
+        ),
+        scan((fromBlock, toBlock) =>
+          client.getLogs({
+            address: poolsAddress,
+            event: resultRecordedEvent,
+            args: { participant: account },
+            fromBlock,
+            toBlock,
+          }),
+        ),
+        scan((fromBlock, toBlock) =>
+          client.getLogs({
+            address: poolsAddress,
+            event: goalBackedEvent,
+            args: { participant: account },
+            fromBlock,
+            toBlock,
+          }),
+        ),
+        scan((fromBlock, toBlock) =>
+          client.getLogs({
+            address: poolsAddress,
+            event: goalBackedEvent,
+            args: { backer: account },
+            fromBlock,
+            toBlock,
+          }),
+        ),
       ]);
 
     let usdcEarned = 0n;
