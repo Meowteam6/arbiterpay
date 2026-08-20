@@ -14,6 +14,13 @@ export const arcEvmNetwork: EvmNetwork = {
   name: "Arc Testnet",
   iconUrls: [],
   nativeCurrency: { name: "USDC", symbol: "USDC", decimals: 18 },
-  rpcUrls: ["https://rpc.testnet.arc.network"],
+  // Blockdaemon leads (matches lib/chains.ts). Dynamic writes these into the
+  // external wallet via wallet_addEthereumChain, so an external-wallet user must
+  // get the healthy endpoint, not the flaky rpc.testnet.arc.network alone, or
+  // their transactions fail. Kept in sync with chains.ts on purpose.
+  rpcUrls: [
+    "https://rpc.blockdaemon.testnet.arc.network",
+    "https://rpc.testnet.arc.network",
+  ],
   blockExplorerUrls: ["https://testnet.arcscan.app"],
 };
