@@ -5,6 +5,7 @@ import { usePathname } from "next/navigation";
 import { DynamicConnectButton } from "@dynamic-labs/sdk-react-core";
 import { DEMO_CHROME, DYNAMIC_CONFIGURED } from "@/lib/config";
 import { useEmbeddedWallet } from "@/lib/wallet";
+import { useDisplayNames } from "@/lib/use-display-names";
 import AgentStrip from "@/components/AgentStrip";
 import TestUsdcChip from "@/components/TestUsdcChip";
 import { CopyAddressButton } from "@/components/FundingHelp";
@@ -92,6 +93,9 @@ function AuthControls() {
  */
 function WalletNote() {
   const { authenticated, address } = useEmbeddedWallet();
+  // Resolve the signed-in wallet to its claimed @handle. The hook is disabled
+  // when the array is empty, so it costs nothing before a wallet exists.
+  const { handleFor } = useDisplayNames(address !== null ? [address] : []);
 
   if (!authenticated) {
     // Rendered while the SDK is still loading too - that window is exactly
@@ -106,11 +110,32 @@ function WalletNote() {
 
   if (address === null) return null;
 
+  const handle = handleFor(address);
+
+  // Claimed: show @handle (linked to the public profile) and keep the copy
+  // chip as a secondary control. Unclaimed: keep the copy chip and nudge the
+  // wallet toward claiming a name, so a bare 0x8a39...6141 is never the whole
+  // identity on the header.
   return (
     <div className="flex items-center gap-2 py-1">
       <span className="shrink-0 text-xs font-semibold uppercase tracking-wide text-muted">
         Your wallet
       </span>
+      {handle !== null ? (
+        <Link
+          href={`/u/${handle}`}
+          className="text-xs font-semibold text-foreground hover:text-accent"
+        >
+          @{handle}
+        </Link>
+      ) : (
+        <Link
+          href="/handle"
+          className="text-xs font-medium text-accent underline underline-offset-2"
+        >
+          Claim a name
+        </Link>
+      )}
       <CopyAddressButton address={address} compact />
     </div>
   );

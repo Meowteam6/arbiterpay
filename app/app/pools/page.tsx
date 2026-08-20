@@ -79,7 +79,14 @@ export default function PoolsPage() {
     // of the page advertising the largest bounties on it, which is the worst
     // possible thing to hand a first-time visitor: they would join, upload,
     // verify, and be paid nothing by a transaction that succeeds.
-    const payable = poolsQuery.data.pools.filter(poolCanPay);
+    // Challenge pools are private, person-aimed dares reached only by their
+    // unguessable link. They must never appear on the public board even when
+    // live and payable, so drop them here alongside the unpayable ones. The
+    // signal is the immutable on-chain initiative, already on PoolInfo - never
+    // the Supabase challenges row, which can be missing.
+    const payable = poolsQuery.data.pools
+      .filter(poolCanPay)
+      .filter((pool) => pool.initiative !== "challenge");
     return groupPoolsByPhase(payable, poolsQuery.data.asOfSeconds);
   }, [poolsQuery.data]);
 

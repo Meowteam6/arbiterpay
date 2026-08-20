@@ -235,6 +235,21 @@ export const healthPoolsAbi = [
       { name: "amount", type: "uint256", indexed: false },
     ],
   },
+  // PoolFunded carries the funder ADDRESS (indexed) and amount only - no
+  // initiative, no goalSpec, no health string - so reading it to name who
+  // chipped in to a pool is redaction-safe. sponsor-data.ts aggregates the same
+  // event into counts and discards the identities; the social contributors
+  // reader is the one place that keeps the funder addresses. Signature verified
+  // against contracts/src/HealthPools.sol.
+  {
+    type: "event",
+    name: "PoolFunded",
+    inputs: [
+      { name: "poolId", type: "uint256", indexed: true },
+      { name: "funder", type: "address", indexed: true },
+      { name: "amount", type: "uint256", indexed: false },
+    ],
+  },
 ] as const;
 
 export const poolCreatedEvent = parseAbiItem(
@@ -257,6 +272,12 @@ export const poolJoinedEvent = parseAbiItem(
 );
 export const resultRecordedEvent = parseAbiItem(
   "event ResultRecorded(uint256 indexed poolId, address indexed participant, bool verdict, uint16 multiplierBps)",
+);
+// Keyed by poolId to name a pool's contributors. Indexed poolId + funder let
+// the RPC filter server-side for one pool; the reader keeps the funder address
+// (sponsor-data.ts's own copy of this event drops it into counts).
+export const poolFundedEvent = parseAbiItem(
+  "event PoolFunded(uint256 indexed poolId, address indexed funder, uint256 amount)",
 );
 
 export const erc20Abi = [

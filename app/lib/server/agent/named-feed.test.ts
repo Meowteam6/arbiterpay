@@ -6,7 +6,11 @@
 
 import { describe, it, expect } from "vitest";
 import { toPublicFeedClaim } from "@/lib/server/agent/feed-view";
-import { participantOf, toNamedPayouts } from "@/lib/server/agent/named-feed";
+import {
+  participantOf,
+  poolIdOf,
+  toNamedPayouts,
+} from "@/lib/server/agent/named-feed";
 import type { LedgerEntry } from "@/lib/server/agent/ledger";
 
 const AT = "2026-08-01T00:00:00.000Z";
@@ -178,5 +182,20 @@ describe("participantOf", () => {
 
   it("returns null when no plan carries a participant", () => {
     expect(participantOf([{ kind: "settle", at: AT, status: "deferred" }])).toBeNull();
+  });
+});
+
+describe("poolIdOf", () => {
+  it("reads the pool id from the plan entry", () => {
+    // sensitiveSettledLedger()'s plan carries poolId "3".
+    expect(poolIdOf(sensitiveSettledLedger())).toBe("3");
+  });
+
+  it("returns null when the plan predates the poolId field", () => {
+    expect(poolIdOf(deferredLedger())).toBeNull();
+  });
+
+  it("returns null when there is no plan at all", () => {
+    expect(poolIdOf([{ kind: "settle", at: AT, status: "deferred" }])).toBeNull();
   });
 });

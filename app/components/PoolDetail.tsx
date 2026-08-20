@@ -7,6 +7,7 @@ import Countdown from "@/components/Countdown";
 import JoinPool from "@/components/JoinPool";
 import BackGoal from "@/components/BackGoal";
 import FundPool from "@/components/FundPool";
+import ChallengeContribute from "@/components/ChallengeContribute";
 import EvidenceUpload from "@/components/EvidenceUpload";
 import WearableCheck from "@/components/WearableCheck";
 import ClaimRail, { type ClaimRailState, type VerdictKind } from "@/components/ClaimRail";
@@ -294,6 +295,45 @@ export default function PoolDetail({ id }: { id: string }) {
   }
 
   const { pool, asOfSeconds } = poolQuery.data;
+
+  // A challenge is a private, person-aimed dare. Its goal (health-adjacent),
+  // the challenger's @handle, and the "challenge" initiative badge are for the
+  // people who belong here only: the target once they have joined through the
+  // invite link, and the creator. Every other visitor - including a stranger
+  // walking sequential /pools/<n> ids - gets a neutral notice with no goal, no
+  // handle, no badge, and no money action. Challenge-ness is the immutable
+  // on-chain initiative, never the Supabase challenges row (which can be absent).
+  const isChallenge = pool.initiative === "challenge";
+  const isCreator =
+    address !== null && address.toLowerCase() === pool.creator.toLowerCase();
+  if (isChallenge && !joined && !isCreator) {
+    // Signed in but participant status still loading: we cannot yet tell a
+    // joined target from a stranger, so hold on a neutral skeleton rather than
+    // flashing the private notice at someone who came in through their link.
+    // Nothing about the challenge is revealed either way.
+    if (address !== null && participantQuery.isLoading) {
+      return (
+        <div className="space-y-4">
+          <Skeleton className="h-6 w-32" />
+          <Skeleton className="h-9 w-3/4" />
+          <Skeleton className="h-14" />
+        </div>
+      );
+    }
+    return (
+      <div className="mx-auto max-w-md py-12 text-center">
+        <h1 className="text-2xl font-bold tracking-tight">
+          This is a private challenge
+        </h1>
+        <p className="mt-3 text-sm text-muted">
+          Open it from the invite link you were sent. That link carries the
+          details this page keeps private.
+        </p>
+        <BrowsePoolsLink label="Browse open pools instead" />
+      </div>
+    );
+  }
+
   const participantCount = participantsQuery.data?.length ?? null;
   const evidenceType = evidenceTypeOf(pool.goalSpec);
   const isDocGoal = evidenceType === "document";
@@ -607,14 +647,23 @@ export default function PoolDetail({ id }: { id: string }) {
       )}
 
       {phase !== "settled" && canPay ? (
-        <div className="space-y-4">
-          <p className="text-xs font-semibold uppercase tracking-wide text-muted">
-            Sponsor action
-          </p>
-          <section className="rounded-2xl border border-edge bg-surface p-5">
-            <FundPool poolId={pool.id} />
-          </section>
-        </div>
+        isChallenge ? (
+          // A challenge pool's top-up must carry the sweep disclosure: miss the
+          // goal and sweep() returns the whole pot to the challenger, not
+          // pro-rata to contributors. ChallengeContribute is the funnel that
+          // states that before anyone can add - never the bare FundPool, which
+          // tops up with no disclosure.
+          <ChallengeContribute poolId={pool.id} potUsd={formatUsdc(pool.balance)} />
+        ) : (
+          <div className="space-y-4">
+            <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+              Sponsor action
+            </p>
+            <section className="rounded-2xl border border-edge bg-surface p-5">
+              <FundPool poolId={pool.id} />
+            </section>
+          </div>
+        )
       ) : null}
     </div>
   );

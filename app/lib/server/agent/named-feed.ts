@@ -51,6 +51,23 @@ export function participantOf(ledger: LedgerEntry[]): string | null {
 }
 
 /**
+ * Read the claim's on-chain pool id from the ledger's plan entry (written at
+ * plan time, see ledger.ts). The public feed uses it to withhold payouts that
+ * belong to a private challenge pool. Mirrors participantOf: a single
+ * address-free, health-free integer is read, nothing else. Returns null when a
+ * legacy plan predates the poolId field - those claims also predate challenges,
+ * so the caller treats a missing id as a public claim.
+ */
+export function poolIdOf(ledger: LedgerEntry[]): string | null {
+  for (const entry of ledger) {
+    if (entry.kind === "plan" && typeof entry.poolId === "string") {
+      return entry.poolId;
+    }
+  }
+  return null;
+}
+
+/**
  * Project settled claims into named payout rows, newest first. `handleFor`
  * maps a lowercased address to its @-less handle, or null when unclaimed.
  */

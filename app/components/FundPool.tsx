@@ -8,7 +8,21 @@ import { useEmbeddedWallet } from "@/lib/wallet";
 import { useUsdcDeposit } from "@/lib/useUsdcDeposit";
 import { ArcTxLink, ErrorNote } from "@/components/ui";
 
-function FundPoolInner({ poolId }: { poolId: bigint }) {
+interface FundPoolCopy {
+  /** Section heading. Defaults to the sponsor top-up wording. */
+  heading: string;
+  /** One-line description under the heading. */
+  description: string;
+  /** The primary-button verb when signed in and idle. */
+  ctaLabel: string;
+}
+
+function FundPoolInner({
+  poolId,
+  heading,
+  description,
+  ctaLabel,
+}: { poolId: bigint } & FundPoolCopy) {
   const queryClient = useQueryClient();
   const { ready, authenticated, login } = useEmbeddedWallet();
   const { status, busy, reset, runUsdcDeposit } = useUsdcDeposit();
@@ -58,16 +72,13 @@ function FundPoolInner({ poolId }: { poolId: bigint }) {
       : status.kind === "depositing"
         ? "Topping up pool..."
         : authenticated
-          ? "Approve and top up"
+          ? ctaLabel
           : "Sign in to top up";
 
   return (
     <div className="space-y-3">
-      <h3 className="text-lg font-semibold">Top up this pool</h3>
-      <p className="text-sm text-muted">
-        Add USDC to the bounty so more participants can be paid when they hit
-        the goal.
-      </p>
+      <h3 className="text-lg font-semibold">{heading}</h3>
+      <p className="text-sm text-muted">{description}</p>
 
       <label className="block text-sm font-medium">
         Amount (USDC)
@@ -140,7 +151,14 @@ function FundPoolInner({ poolId }: { poolId: bigint }) {
   );
 }
 
-export default function FundPool({ poolId }: { poolId: bigint }) {
+export default function FundPool({
+  poolId,
+  heading = "Top up this pool",
+  description = "Add USDC to the bounty so more participants can be paid when they hit the goal.",
+  ctaLabel = "Approve and top up",
+}: {
+  poolId: bigint;
+} & Partial<FundPoolCopy>) {
   if (!DYNAMIC_CONFIGURED) {
     return (
       <ErrorNote
@@ -149,5 +167,12 @@ export default function FundPool({ poolId }: { poolId: bigint }) {
       />
     );
   }
-  return <FundPoolInner poolId={poolId} />;
+  return (
+    <FundPoolInner
+      poolId={poolId}
+      heading={heading}
+      description={description}
+      ctaLabel={ctaLabel}
+    />
+  );
 }

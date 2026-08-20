@@ -15,9 +15,11 @@ import { listLedgerGoalIds, readLedger } from "@/lib/server/agent/ledger";
 import { toPublicFeedClaim } from "@/lib/server/agent/feed-view";
 import {
   participantOf,
+  poolIdOf,
   toNamedPayouts,
   type NamedFeedInput,
 } from "@/lib/server/agent/named-feed";
+import { isChallengePool } from "@/lib/server/challenge-pool";
 import { resolveProfiles } from "@/lib/server/social-profile";
 import { jsonError, newCorrelationId, safeError } from "@/lib/server/http";
 
@@ -27,15 +29,37 @@ export async function GET() {
   const cid = newCorrelationId("social-feed");
   try {
     const index = await listLedgerGoalIds(FEED_LIMIT);
-    const inputs: NamedFeedInput[] = await Promise.all(
+    const rows = await Promise.all(
       index.map(async ({ goalId, at }) => {
         const ledger = await readLedger(goalId);
         return {
-          claim: toPublicFeedClaim(goalId, at, ledger),
-          participant: participantOf(ledger),
+          input: {
+            claim: toPublicFeedClaim(goalId, at, ledger),
+            participant: participantOf(ledger),
+          } satisfies NamedFeedInput,
+          poolId: poolIdOf(ledger),
         };
       }),
     );
+
+    // Withhold private challenge pools from the public feed. A row with no pool
+    // linkage predates the poolId field - and predates challenges entirely - so
+    // it is a public claim and stays. A row with a pool id is checked and
+    // dropped when that pool is a challenge (or when the read is uncertain:
+    // isChallengePool excludes on doubt). Flags are resolved once per unique
+    // pool id and cached, so the feed never refetches per row.
+    const poolIds = Array.from(
+      new Set(rows.map((r) => r.poolId).filter((p): p is string => p !== null)),
+    );
+    const challengeFlag = new Map<string, boolean>();
+    await Promise.all(
+      poolIds.map(async (poolId) => {
+        challengeFlag.set(poolId, await isChallengePool(poolId));
+      }),
+    );
+    const inputs: NamedFeedInput[] = rows
+      .filter((r) => r.poolId === null || challengeFlag.get(r.poolId) !== true)
+      .map((r) => r.input);
 
     const addresses = inputs
       .map((input) => input.participant)

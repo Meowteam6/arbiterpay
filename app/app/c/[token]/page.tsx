@@ -2,11 +2,17 @@ import type { Metadata } from "next";
 import Link from "next/link";
 import Countdown from "@/components/Countdown";
 import ChallengeAccept from "@/components/ChallengeAccept";
+import ChallengeContribute from "@/components/ChallengeContribute";
+import ShareChallenge from "@/components/ShareChallenge";
 import { Badge, Money, Stat, TAP_TARGET } from "@/components/ui";
 import { displayGoalSpec, fetchPool, formatUsdc } from "@/lib/contract";
 import { poolCanPay, poolPhase } from "@/lib/pool-lifecycle";
 import { getChallengeByToken } from "@/lib/server/challenges";
-import { getProfileByAddress } from "@/lib/server/social-profile";
+import { fetchPoolFunders } from "@/lib/server/pool-funders";
+import {
+  getProfileByAddress,
+  resolveProfiles,
+} from "@/lib/server/social-profile";
 import { displayNameFor } from "@/lib/social";
 
 // The token is a bearer capability and the row is looked up live per request,
@@ -98,6 +104,27 @@ export default async function ChallengeLandingPage({
     challengerProfile?.handle ?? null,
   );
 
+  // Contributors who chipped in via fundPool, named by @handle. createPool does
+  // NOT emit PoolFunded, so this is only the friends who sweetened the pot AFTER
+  // creation - never the challenger, who is already named above. Best-effort:
+  // any read failure just hides the strip rather than failing the landing.
+  let contributorNames: string[] = [];
+  try {
+    const funders = await fetchPoolFunders(poolIdBig);
+    if (funders.length > 0) {
+      const resolved = await resolveProfiles(funders);
+      contributorNames = funders.map((funder) =>
+        displayNameFor(funder, resolved.get(funder.toLowerCase())?.handle ?? null),
+      );
+    }
+  } catch {
+    contributorNames = [];
+  }
+
+  // Friends can grow the pot and rally more friends only while the challenge is
+  // live and can actually pay. The same gate the accept block uses.
+  const canGrow = phase === "live" && canPay;
+
   const accept =
     phase === "live" && canPay ? (
       <ChallengeAccept poolId={challenge.poolId} />
@@ -143,13 +170,28 @@ export default async function ChallengeLandingPage({
   return (
     <div className="mx-auto max-w-xl space-y-6 py-6">
       <div className="text-center">
-        <Badge tone="accent">You&apos;ve been challenged</Badge>
+        <Badge tone="accent">Challenge</Badge>
         <h1 className="mt-4 text-2xl font-bold leading-tight tracking-tight sm:text-3xl">
-          {challengerName} put up{" "}
-          <span className="text-accent">{rewardUsd} USDC</span> on you.
+          {challengerName} challenged you
         </h1>
+        <p className="mt-3 text-base text-foreground/80">
+          They put up{" "}
+          <span className="font-semibold text-accent">{rewardUsd} USDC</span> on
+          you.
+        </p>
         {challenge.targetHandle !== null ? (
           <p className="mt-2 text-sm text-muted">For {challenge.targetHandle}</p>
+        ) : null}
+        {contributorNames.length > 0 ? (
+          <p className="mt-3 text-sm text-muted">
+            Backed by{" "}
+            <span className="font-semibold text-foreground">
+              {contributorNames.slice(0, 3).join(", ")}
+            </span>
+            {contributorNames.length > 3
+              ? ` +${contributorNames.length - 3} more`
+              : ""}
+          </p>
         ) : null}
       </div>
 
@@ -182,6 +224,31 @@ export default async function ChallengeLandingPage({
       </div>
 
       {accept}
+
+      {canGrow ? (
+        <>
+          <ChallengeContribute poolId={poolIdBig} potUsd={rewardUsd} />
+
+          <div className="space-y-3 rounded-2xl border border-edge bg-surface p-5">
+            <div className="space-y-1">
+              <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+                Rally your friends
+              </p>
+              <p className="text-sm text-muted">
+                Send this to people who want you to win. They can chip in and
+                grow the reward you collect when you hit the goal.
+              </p>
+            </div>
+            <ShareChallenge
+              token={token}
+              title="Back me on GoHealthMe"
+              message="Back me on this - I've got USDC riding on hitting my goal. Chip in and help me get there:"
+              emailSubject="Back me on this"
+              shareLabel="Rally friends"
+            />
+          </div>
+        </>
+      ) : null}
     </div>
   );
 }

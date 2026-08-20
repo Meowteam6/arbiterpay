@@ -24,7 +24,9 @@ import Link from "next/link";
 import { DYNAMIC_CONFIGURED } from "@/lib/config";
 import { parseUsdc, withDocMarker } from "@/lib/contract";
 import { useEmbeddedWallet } from "@/lib/wallet";
+import { useDisplayNames } from "@/lib/use-display-names";
 import { useUsdcDeposit } from "@/lib/useUsdcDeposit";
+import ShareChallenge from "@/components/ShareChallenge";
 import { resolveNewPoolId } from "@/lib/resolve-pool-id";
 import { useWalletAuth } from "@/lib/useWalletAuth";
 import { authBlockReason, fetchWithWalletAuth } from "@/lib/client-auth";
@@ -115,6 +117,8 @@ function CreateChallengeInner() {
   const { ready, authenticated, address, login } = useEmbeddedWallet();
   const requestAuth = useWalletAuth();
   const { status, busy, reset, runUsdcDeposit } = useUsdcDeposit();
+  // The challenger's own name, for the "from @you" line on the done screen.
+  const { displayName } = useDisplayNames(address !== null ? [address] : []);
 
   const [goal, setGoal] = useState("");
   const [reward, setReward] = useState("");
@@ -263,6 +267,11 @@ function CreateChallengeInner() {
           <p className="text-base font-semibold text-accent">
             Challenge sent. The money is on the line.
           </p>
+          {address !== null ? (
+            <p className="text-xs font-medium text-foreground/70">
+              From {displayName(address)}
+            </p>
+          ) : null}
           <p className="text-sm text-foreground/80">
             Send this link to the one person it is for. Whoever opens it can
             accept and go for the goal - they pay nothing, and the reward pays
@@ -270,10 +279,20 @@ function CreateChallengeInner() {
           </p>
         </div>
 
-        <div className="space-y-2">
+        <div className="space-y-3">
           <p className="text-xs font-semibold uppercase tracking-wide text-muted">
-            The challenge link
+            Send it to them
           </p>
+          {/* Web Share / Text / Email, prefilled with the dare, reward and
+              link. CopyLink stays below as the desktop fallback. */}
+          <ShareChallenge
+            url={phase.url}
+            title="You've been challenged on GoHealthMe"
+            message={`I'm daring you: ${goal.trim()}. Hit it and I pay you ${reward.trim()} USDC.`}
+            emailSubject="I'm daring you - GoHealthMe"
+            includeCopy={false}
+            shareLabel="Share the dare"
+          />
           <CopyLink url={phase.url} />
           <p className="text-xs text-muted">
             Anyone with this link can see the dare and accept it, so send it
