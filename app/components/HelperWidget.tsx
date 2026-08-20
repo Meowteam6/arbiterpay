@@ -5,8 +5,10 @@
 // (Supabase). Dismissible, mobile-first, never a trapping modal.
 //
 // It reuses the app's existing reads rather than rebuilding them:
-//   - auth + address + login  from useEmbeddedWallet (safe in both provider
-//     branches: the stub answers signed-out when Dynamic is unconfigured)
+//   - auth + address         from useEmbeddedWallet (safe in both provider
+//     branches: the stub answers signed-out when Dynamic is unconfigured).
+//     Sign-in itself is email-first: the coach renders SignInPanel for the
+//     signIn step instead of opening the raw wallet modal.
 //   - on-chain USDC balance    from the SAME react-query key + fn as
 //     TestUsdcChip, so the cache is shared and nothing double-fetches
 //   - handle-claimed           from the existing /api/social/resolve lookup
@@ -31,6 +33,7 @@ import {
   ASK_PER_SESSION_CAP,
   MAX_QUESTION_CHARS,
 } from "@/lib/server/help/knowledge";
+import SignInPanel from "@/components/SignInPanel";
 
 type Tab = "coach" | "ask" | "feedback";
 type AskMessage = { role: "you" | "spotter"; text: string };
@@ -192,25 +195,34 @@ function CoachTab({
       <p className="text-sm font-semibold text-accent">{copy.headline}</p>
       <p className="mt-1 text-sm leading-relaxed text-muted">{copy.body}</p>
 
-      <div className="mt-3 flex flex-wrap gap-2">
-        <button
-          type="button"
-          onClick={onPrimary}
-          disabled={busy}
-          className="min-h-11 rounded-lg bg-accent-strong px-4 py-2 text-sm font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {primaryLabel}
-        </button>
-        {copy.secondary !== undefined ? (
+      {step.id === "signIn" ? (
+        // Email-first in the coach too: render the SignInPanel in place of a
+        // bare login() button so the provisioned embedded wallet stays the
+        // default here and the raw wallet modal never opens.
+        <div className="mt-3">
+          <SignInPanel />
+        </div>
+      ) : (
+        <div className="mt-3 flex flex-wrap gap-2">
           <button
             type="button"
-            onClick={onSecondary}
-            className="min-h-11 rounded-lg border border-edge px-4 py-2 text-sm font-medium text-muted hover:text-foreground"
+            onClick={onPrimary}
+            disabled={busy}
+            className="min-h-11 rounded-lg bg-accent-strong px-4 py-2 text-sm font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
           >
-            {copy.secondary}
+            {primaryLabel}
           </button>
-        ) : null}
-      </div>
+          {copy.secondary !== undefined ? (
+            <button
+              type="button"
+              onClick={onSecondary}
+              className="min-h-11 rounded-lg border border-edge px-4 py-2 text-sm font-medium text-muted hover:text-foreground"
+            >
+              {copy.secondary}
+            </button>
+          ) : null}
+        </div>
+      )}
 
       {step.loading ? (
         <p className="mt-2 animate-pulse text-xs text-muted">
@@ -463,7 +475,7 @@ const TABS: { id: Tab; label: string }[] = [
 ];
 
 export default function HelperWidget() {
-  const { authenticated, address, login } = useEmbeddedWallet();
+  const { authenticated, address } = useEmbeddedWallet();
   const router = useRouter();
   const pathname = usePathname();
   const queryClient = useQueryClient();
@@ -526,7 +538,8 @@ export default function HelperWidget() {
   const onPrimary = useCallback(() => {
     switch (step.id) {
       case "signIn":
-        login();
+        // Sign-in is handled inline by the SignInPanel the coach renders for
+        // this step, not by this button - kept in the union for exhaustiveness.
         break;
       case "getUsdc":
         if (address !== null) {
@@ -553,7 +566,7 @@ export default function HelperWidget() {
         setOpen(false);
         break;
     }
-  }, [step.id, login, address, fund, queryClient, router]);
+  }, [step.id, address, fund, queryClient, router]);
 
   const onSecondary = useCallback(() => {
     setOpen(false);

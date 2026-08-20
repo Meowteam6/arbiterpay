@@ -7,6 +7,7 @@ import { getHealthPoolsAddress, parseUsdc } from "@/lib/contract";
 import { useEmbeddedWallet } from "@/lib/wallet";
 import { useUsdcDeposit } from "@/lib/useUsdcDeposit";
 import { ArcTxLink, ErrorNote } from "@/components/ui";
+import SignInGate from "@/components/SignInGate";
 
 interface FundPoolCopy {
   /** Section heading. Defaults to the sponsor top-up wording. */
@@ -24,7 +25,7 @@ function FundPoolInner({
   ctaLabel,
 }: { poolId: bigint } & FundPoolCopy) {
   const queryClient = useQueryClient();
-  const { ready, authenticated, login } = useEmbeddedWallet();
+  const { ready, authenticated } = useEmbeddedWallet();
   const { status, busy, reset, runUsdcDeposit } = useUsdcDeposit();
   const [amount, setAmount] = useState<string>("");
   const [formError, setFormError] = useState<string | null>(null);
@@ -92,20 +93,24 @@ function FundPoolInner({
         />
       </label>
 
-      <button
-        type="button"
-        disabled={!ready || busy}
-        onClick={() => {
-          if (!authenticated) {
-            login();
-            return;
-          }
-          void submit();
-        }}
-        className="w-full rounded-xl border border-accent/50 bg-surface-raised px-5 py-3.5 text-base font-semibold text-accent hover:bg-accent-deep disabled:cursor-not-allowed disabled:opacity-60"
-      >
-        {primaryLabel}
-      </button>
+      <SignInGate note="Sign in to top up this pool.">
+        {(openSignIn) => (
+          <button
+            type="button"
+            disabled={!ready || busy}
+            onClick={() => {
+              if (!authenticated) {
+                openSignIn();
+                return;
+              }
+              void submit();
+            }}
+            className="w-full rounded-xl border border-accent/50 bg-surface-raised px-5 py-3.5 text-base font-semibold text-accent hover:bg-accent-deep disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {primaryLabel}
+          </button>
+        )}
+      </SignInGate>
 
       {status.kind === "approving" || status.kind === "depositing" ? (
         <p className="text-xs text-muted">

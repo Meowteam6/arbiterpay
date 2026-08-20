@@ -51,6 +51,7 @@ import AgentReceipt from "@/components/AgentReceipt";
 import Countdown from "@/components/Countdown";
 import PayoutMoment from "@/components/PayoutMoment";
 import { ErrorNote, Skeleton } from "@/components/ui";
+import SignInGate from "@/components/SignInGate";
 
 // text/plain stays accepted so old sample records keep working, but it is
 // deliberately not advertised anywhere: a .txt on camera reads as fake.
@@ -170,7 +171,7 @@ function EvidenceUploadInner({
   poolId: bigint;
   goalSpec: string;
 }) {
-  const { ready, authenticated, address, login } = useEmbeddedWallet();
+  const { ready, authenticated, address } = useEmbeddedWallet();
   const requestAuth = useWalletAuth();
   const queryClient = useQueryClient();
   const inputRef = useRef<HTMLInputElement>(null);
@@ -592,14 +593,18 @@ function EvidenceUploadInner({
           <p className="text-sm text-foreground/80">{status.reason}</p>
         </div>
         {!authenticated || address === null ? (
-          <button
-            type="button"
-            disabled={!ready}
-            onClick={login}
-            className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            Sign in to see this claim
-          </button>
+          <SignInGate note="Sign in to see this claim.">
+            {(openSignIn) => (
+              <button
+                type="button"
+                disabled={!ready}
+                onClick={openSignIn}
+                className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Sign in to see this claim
+              </button>
+            )}
+          </SignInGate>
         ) : (
           <button
             type="button"
@@ -849,22 +854,26 @@ function EvidenceUploadInner({
       </button>
 
       {selected !== null ? (
-        <button
-          type="button"
-          disabled={!ready || busy}
-          onClick={() => {
-            if (!authenticated) {
-              login();
-              return;
-            }
-            void submit();
-          }}
-          className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {authenticated
-            ? "Verify record and claim bounty"
-            : "Sign in to submit"}
-        </button>
+        <SignInGate note="Sign in to submit your record.">
+          {(openSignIn) => (
+            <button
+              type="button"
+              disabled={!ready || busy}
+              onClick={() => {
+                if (!authenticated) {
+                  openSignIn();
+                  return;
+                }
+                void submit();
+              }}
+              className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {authenticated
+                ? "Verify record and claim bounty"
+                : "Sign in to submit"}
+            </button>
+          )}
+        </SignInGate>
       ) : null}
 
       {formError !== null ? (

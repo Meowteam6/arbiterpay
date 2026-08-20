@@ -13,6 +13,7 @@ import { useWalletAuth } from "@/lib/useWalletAuth";
 import { authBlockReason, fetchWithWalletAuth } from "@/lib/client-auth";
 import { checkEmoji, checkHandle, HANDLE_MAX, EMOJI_MAX } from "@/lib/social";
 import { ErrorNote } from "@/components/ui";
+import SignInGate from "@/components/SignInGate";
 
 type Status =
   | { kind: "idle" }
@@ -21,7 +22,7 @@ type Status =
   | { kind: "error"; message: string };
 
 function ClaimHandleInner() {
-  const { ready, authenticated, address, login } = useEmbeddedWallet();
+  const { ready, authenticated, address } = useEmbeddedWallet();
   const requestAuth = useWalletAuth();
   const [handle, setHandle] = useState("");
   const [emoji, setEmoji] = useState("");
@@ -162,24 +163,28 @@ function ClaimHandleInner() {
         />
       </label>
 
-      <button
-        type="button"
-        disabled={!ready || saving}
-        onClick={() => {
-          if (!authenticated) {
-            login();
-            return;
-          }
-          void submit();
-        }}
-        className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
-      >
-        {saving
-          ? "Signing and saving..."
-          : authenticated
-            ? "Claim handle"
-            : "Sign in to claim"}
-      </button>
+      <SignInGate note="Sign in to claim your handle.">
+        {(openSignIn) => (
+          <button
+            type="button"
+            disabled={!ready || saving}
+            onClick={() => {
+              if (!authenticated) {
+                openSignIn();
+                return;
+              }
+              void submit();
+            }}
+            className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {saving
+              ? "Signing and saving..."
+              : authenticated
+                ? "Claim handle"
+                : "Sign in to claim"}
+          </button>
+        )}
+      </SignInGate>
 
       <p className="text-xs text-muted">
         Claiming signs a message to prove the wallet is yours. Nothing is

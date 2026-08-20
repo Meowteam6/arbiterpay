@@ -15,6 +15,7 @@ import { useUsdcDeposit } from "@/lib/useUsdcDeposit";
 import { isEconomicallyDeadConfig } from "@/lib/pool-lifecycle";
 import { resolveNewPoolId } from "@/lib/resolve-pool-id";
 import { ArcTxLink, ErrorNote } from "@/components/ui";
+import SignInGate from "@/components/SignInGate";
 
 const DURATION_OPTIONS: { label: string; days: number }[] = [
   { label: "1 day", days: 1 },
@@ -71,7 +72,7 @@ const DOC_TEMPLATES: DocTemplate[] = [
 function CreatePoolInner() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { ready, authenticated, login } = useEmbeddedWallet();
+  const { ready, authenticated } = useEmbeddedWallet();
   const { status, busy, reset, runUsdcDeposit } = useUsdcDeposit();
 
   const [evidenceType, setEvidenceType] = useState<EvidenceType>("wearable");
@@ -415,20 +416,24 @@ function CreatePoolInner() {
           </div>
         </fieldset>
 
-        <button
-          type="button"
-          disabled={!ready || busy || redirecting}
-          onClick={() => {
-            if (!authenticated) {
-              login();
-              return;
-            }
-            void submit();
-          }}
-          className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {primaryLabel}
-        </button>
+        <SignInGate note="Sign in to create this pool.">
+          {(openSignIn) => (
+            <button
+              type="button"
+              disabled={!ready || busy || redirecting}
+              onClick={() => {
+                if (!authenticated) {
+                  openSignIn();
+                  return;
+                }
+                void submit();
+              }}
+              className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {primaryLabel}
+            </button>
+          )}
+        </SignInGate>
 
         {status.kind === "approving" || status.kind === "depositing" ? (
           <div className="rounded-xl border border-edge bg-surface-raised p-4 text-sm">

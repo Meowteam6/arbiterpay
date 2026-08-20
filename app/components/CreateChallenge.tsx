@@ -27,6 +27,7 @@ import { useEmbeddedWallet } from "@/lib/wallet";
 import { useDisplayNames } from "@/lib/use-display-names";
 import { useUsdcDeposit } from "@/lib/useUsdcDeposit";
 import ShareChallenge from "@/components/ShareChallenge";
+import SignInGate from "@/components/SignInGate";
 import { resolveNewPoolId } from "@/lib/resolve-pool-id";
 import { useWalletAuth } from "@/lib/useWalletAuth";
 import { authBlockReason, fetchWithWalletAuth } from "@/lib/client-auth";
@@ -114,7 +115,7 @@ function CopyLink({ url }: { url: string }) {
 }
 
 function CreateChallengeInner() {
-  const { ready, authenticated, address, login } = useEmbeddedWallet();
+  const { ready, authenticated, address } = useEmbeddedWallet();
   const requestAuth = useWalletAuth();
   const { status, busy, reset, runUsdcDeposit } = useUsdcDeposit();
   // The challenger's own name, for the "from @you" line on the done screen.
@@ -441,20 +442,24 @@ function CreateChallengeInner() {
           </span>
         </div>
 
-        <button
-          type="button"
-          disabled={!ready || busy || linking}
-          onClick={() => {
-            if (!authenticated) {
-              login();
-              return;
-            }
-            void submit();
-          }}
-          className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          {primaryLabel}
-        </button>
+        <SignInGate note="Sign in to send this challenge.">
+          {(openSignIn) => (
+            <button
+              type="button"
+              disabled={!ready || busy || linking}
+              onClick={() => {
+                if (!authenticated) {
+                  openSignIn();
+                  return;
+                }
+                void submit();
+              }}
+              className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {primaryLabel}
+            </button>
+          )}
+        </SignInGate>
 
         {status.kind === "approving" || status.kind === "depositing" ? (
           <div className="rounded-xl border border-edge bg-surface-raised p-4 text-sm">

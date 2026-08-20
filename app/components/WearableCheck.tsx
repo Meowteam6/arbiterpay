@@ -57,6 +57,7 @@ import AgentReceipt from "@/components/AgentReceipt";
 import Countdown from "@/components/Countdown";
 import PayoutMoment from "@/components/PayoutMoment";
 import { ErrorNote, Skeleton, TAP_TARGET } from "@/components/ui";
+import SignInGate from "@/components/SignInGate";
 
 // Same cadence as the document flow, but wearable runs wait on provider data
 // pulls, so the cap allows five minutes before a stuck run surfaces.
@@ -137,7 +138,7 @@ function WearableCheckInner({
   goalSpec: string;
   onSwitchToDocument?: () => void;
 }) {
-  const { ready, authenticated, address, login } = useEmbeddedWallet();
+  const { ready, authenticated, address } = useEmbeddedWallet();
   const requestAuth = useWalletAuth();
   const queryClient = useQueryClient();
   const [status, setStatus] = useState<CheckStatus>({ kind: "idle" });
@@ -478,14 +479,18 @@ function WearableCheckInner({
           <p className="text-sm text-foreground/80">{status.reason}</p>
         </div>
         {!authenticated || address === null ? (
-          <button
-            type="button"
-            disabled={!ready}
-            onClick={login}
-            className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            Sign in to see this claim
-          </button>
+          <SignInGate note="Sign in to see this claim.">
+            {(openSignIn) => (
+              <button
+                type="button"
+                disabled={!ready}
+                onClick={openSignIn}
+                className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                Sign in to see this claim
+              </button>
+            )}
+          </SignInGate>
         ) : (
           <button
             type="button"
@@ -698,14 +703,18 @@ function WearableCheckInner({
       </p>
 
       {!authenticated || address === null ? (
-        <button
-          type="button"
-          disabled={!ready}
-          onClick={login}
-          className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
-        >
-          Sign in to run the check
-        </button>
+        <SignInGate note="Sign in to run the check.">
+          {(openSignIn) => (
+            <button
+              type="button"
+              disabled={!ready}
+              onClick={openSignIn}
+              className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              Sign in to run the check
+            </button>
+          )}
+        </SignInGate>
       ) : providerQuery.isLoading ? (
         <div className="space-y-2">
           <Skeleton className="h-12 w-full" />

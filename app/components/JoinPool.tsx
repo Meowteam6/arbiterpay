@@ -20,6 +20,7 @@ import {
 } from "@/lib/tx-errors";
 import { ErrorNote } from "@/components/ui";
 import FundingHelp from "@/components/FundingHelp";
+import SignInGate from "@/components/SignInGate";
 
 type JoinStatus =
   | { kind: "idle" }
@@ -38,7 +39,7 @@ function JoinPoolInner({
   entryFee: bigint;
   alreadyJoined: boolean;
 }) {
-  const { ready, authenticated, address, login, getArcWalletClient } =
+  const { ready, authenticated, address, getArcWalletClient } =
     useEmbeddedWallet();
   const queryClient = useQueryClient();
   const [rawStatus, setStatus] = useState<JoinStatus>({ kind: "idle" });
@@ -191,26 +192,30 @@ function JoinPoolInner({
 
   return (
     <div className="space-y-3">
-      <button
-        type="button"
-        disabled={!ready || busy}
-        onClick={() => {
-          if (!authenticated) {
-            login();
-            return;
-          }
-          void startJoin();
-        }}
-        className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
-      >
-        {status.kind === "checking"
-          ? "Checking your balance..."
-          : status.kind === "joining"
-            ? "Joining on-chain..."
-            : authenticated
-              ? "I'm in"
-              : "Sign in to join"}
-      </button>
+      <SignInGate note="Sign in to join this pool.">
+        {(openSignIn) => (
+          <button
+            type="button"
+            disabled={!ready || busy}
+            onClick={() => {
+              if (!authenticated) {
+                openSignIn();
+                return;
+              }
+              void startJoin();
+            }}
+            className="w-full rounded-xl bg-accent-strong px-5 py-3.5 text-base font-semibold text-background hover:bg-accent disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {status.kind === "checking"
+              ? "Checking your balance..."
+              : status.kind === "joining"
+                ? "Joining on-chain..."
+                : authenticated
+                  ? "I'm in"
+                  : "Sign in to join"}
+          </button>
+        )}
+      </SignInGate>
       <p className="text-xs text-muted">
         One wallet, one entry. Sign in with an email - the wallet is created
         for you, no seed phrase and no app to install.

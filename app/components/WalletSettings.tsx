@@ -199,6 +199,33 @@ function WalletDetail({ address }: { address: `0x${string}` }) {
 
       {isEmbedded === true ? <BackupSection /> : null}
 
+      {isEmbedded === false ? (
+        // The one-step escape for a stuck external-wallet user. Signing out
+        // drops the connected wallet and lands on WalletSettings' signed-out
+        // branch, which renders the email-first SignInPanel - so the next
+        // wallet is the provisioned embedded one, with no reconnect prompts.
+        <section className="rounded-2xl border border-accent/40 bg-accent-deep/20 p-5">
+          <h2 className="text-lg font-semibold">
+            Switch to your GoHealthMe email wallet
+          </h2>
+          <p className="mt-2 text-sm text-muted">
+            You are on an external wallet. If a transaction keeps asking you to
+            reconnect, switch to the wallet we make from your email - no
+            extension and no reconnect prompts. This signs you out of the
+            connected wallet, then you sign back in with an email code.
+          </p>
+          <button
+            type="button"
+            onClick={() => {
+              void logout();
+            }}
+            className="mt-4 min-h-11 w-full rounded-xl bg-accent-strong px-5 py-3 text-sm font-semibold text-background hover:bg-accent"
+          >
+            Switch to my email wallet
+          </button>
+        </section>
+      ) : null}
+
       <button
         type="button"
         onClick={() => {

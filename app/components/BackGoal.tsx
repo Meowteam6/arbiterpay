@@ -13,9 +13,10 @@ import { useEmbeddedWallet } from "@/lib/wallet";
 import { useUsdcDeposit } from "@/lib/useUsdcDeposit";
 import { useDisplayNames } from "@/lib/use-display-names";
 import { ArcTxLink, ErrorNote } from "@/components/ui";
+import SignInGate from "@/components/SignInGate";
 
 function BackGoalInner({ poolId }: { poolId: bigint }) {
-  const { ready, authenticated, address, login } = useEmbeddedWallet();
+  const { ready, authenticated, address } = useEmbeddedWallet();
   const queryClient = useQueryClient();
   const { status, busy, reset, runUsdcDeposit } = useUsdcDeposit();
   const [participant, setParticipant] = useState<string>("");
@@ -141,20 +142,24 @@ function BackGoalInner({ poolId }: { poolId: bigint }) {
               className="mt-1 w-full rounded-xl border border-edge bg-surface-raised px-3 py-3 text-base"
             />
           </label>
-          <button
-            type="button"
-            disabled={!ready || busy}
-            onClick={() => {
-              if (!authenticated) {
-                login();
-                return;
-              }
-              void submit();
-            }}
-            className="w-full rounded-xl border border-accent/50 bg-surface-raised px-5 py-3.5 text-base font-semibold text-accent hover:bg-accent-deep disabled:cursor-not-allowed disabled:opacity-60"
-          >
-            {primaryLabel}
-          </button>
+          <SignInGate note="Sign in to back this goal.">
+            {(openSignIn) => (
+              <button
+                type="button"
+                disabled={!ready || busy}
+                onClick={() => {
+                  if (!authenticated) {
+                    openSignIn();
+                    return;
+                  }
+                  void submit();
+                }}
+                className="w-full rounded-xl border border-accent/50 bg-surface-raised px-5 py-3.5 text-base font-semibold text-accent hover:bg-accent-deep disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {primaryLabel}
+              </button>
+            )}
+          </SignInGate>
         </>
       )}
 

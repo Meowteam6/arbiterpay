@@ -25,6 +25,7 @@ import Link from "next/link";
 import { useQuery } from "@tanstack/react-query";
 import CreatePool from "@/components/CreatePool";
 import SponsorPoolOutcome from "@/components/SponsorPoolOutcome";
+import SignInGate from "@/components/SignInGate";
 import {
   Badge,
   EmptyState,
@@ -105,7 +106,7 @@ function PortfolioSummary({ aggregates }: { aggregates: PoolAggregate[] }) {
 }
 
 export default function SponsorConsole() {
-  const { ready, authenticated, address, login } = useEmbeddedWallet();
+  const { ready, authenticated, address } = useEmbeddedWallet();
   const [showCreate, setShowCreate] = useState(false);
 
   // Address-independent: the whole board plus its event totals in one snapshot,
@@ -228,13 +229,17 @@ export default function SponsorConsole() {
           title="Sign in to run a pool"
           detail="Creating and funding a bounty pulls USDC from your wallet, so the console opens once you sign in. Your pools and their aggregate outcomes live here."
           action={
-            <button
-              type="button"
-              onClick={login}
-              className="rounded-xl bg-accent-strong px-6 py-3 text-sm font-semibold text-background hover:bg-accent"
-            >
-              Sign in
-            </button>
+            <SignInGate note="Sign in to run a pool.">
+              {(openSignIn) => (
+                <button
+                  type="button"
+                  onClick={openSignIn}
+                  className="rounded-xl bg-accent-strong px-6 py-3 text-sm font-semibold text-background hover:bg-accent"
+                >
+                  Sign in
+                </button>
+              )}
+            </SignInGate>
           }
         />
       </div>
