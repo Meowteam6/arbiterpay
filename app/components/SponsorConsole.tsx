@@ -35,11 +35,7 @@ import {
   TAP_TARGET,
 } from "@/components/ui";
 import { fetchPools, formatUsdc, type PoolInfo } from "@/lib/contract";
-import {
-  fetchPoolEventTotals,
-  toPoolAggregate,
-  type PoolEventTotals,
-} from "@/lib/sponsor-data";
+import { toPoolAggregate, type PoolEventTotals } from "@/lib/sponsor-data";
 import {
   portfolioAggregate,
   portfolioDisplay,
@@ -119,10 +115,32 @@ export default function SponsorConsole() {
   const consoleQuery = useQuery<ConsoleData>({
     queryKey: ["sponsor-console"],
     queryFn: async () => {
-      const [pools, totals] = await Promise.all([
+      // Outcome totals come from the server route: the historical log scan
+      // cannot run from the browser (Arc's public RPCs prune history and cap
+      // getLogs), so it runs server-side against the archival ARC_RPC_URL and
+      // returns bigints as strings, which we parse back here.
+      const [pools, totalsRes] = await Promise.all([
         fetchPools(),
-        fetchPoolEventTotals(),
+        fetch("/api/sponsor/outcomes").then((r) => r.json()),
       ]);
+      const raw = (totalsRes?.totals ?? {}) as Record<
+        string,
+        {
+          joined: number;
+          completions: number;
+          paidUsdc: string;
+          toppedUpUsdc: string;
+        }
+      >;
+      const totals: Record<string, PoolEventTotals> = {};
+      for (const [poolId, t] of Object.entries(raw)) {
+        totals[poolId] = {
+          joined: t.joined,
+          completions: t.completions,
+          paidUsdc: BigInt(t.paidUsdc),
+          toppedUpUsdc: BigInt(t.toppedUpUsdc),
+        };
+      }
       return {
         pools,
         totals,
