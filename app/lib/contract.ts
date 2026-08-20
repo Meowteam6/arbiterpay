@@ -10,6 +10,7 @@ import {
   type PublicClient,
 } from "viem";
 import { arcTestnet } from "@/lib/chains";
+import { poolsScanFromBlock } from "@/lib/server/chunked-logs";
 
 // ---------------------------------------------------------------- addresses
 
@@ -412,8 +413,68 @@ async function readPool(address: Address, id: bigint): Promise<PoolInfo> {
 }
 
 /**
- * Discover pools via PoolCreated logs, falling back to sequential poolCount
- * enumeration if the RPC rejects the log query (pool ids run 1..poolCount).
+ * The browser's per-call eth_getLogs window.
+ *
+ * Deliberately far smaller than the 90k window in lib/server/chunked-logs.ts.
+ * That window targets the archival endpoint the server override (ARC_RPC_URL)
+ * points at, which allows 90k. The browser has no such override: its fallback
+ * list leads with rpc.blockdaemon.testnet.arc.network, which has PRUNED all
+ * deploy-era history (it answers "pruned history unavailable" below ~57M), then
+ * falls through to rpc.testnet.arc.network, which caps eth_getLogs at a 10,000
+ * block range ("eth_getLogs is limited to a 10,000 range") and rate-limits a
+ * burst of calls. 9,000 stays safely under that 10k cap. Measured 2026-08-20
+ * against both live endpoints.
+ */
+const CLIENT_LOG_WINDOW = 9_000n;
+
+/** Windows run at once. Kept low because a burst trips the public RPC's rate
+ *  limit, and the sponsor console fires its own scan alongside this one. */
+const CLIENT_LOG_CONCURRENCY = 4;
+
+/**
+ * Windowed eth_getLogs. Splits [fromBlock, toBlock] into spans no wider than
+ * CLIENT_LOG_WINDOW and concatenates the results, so no single call exceeds the
+ * public RPC's range cap. Mirrors scanInWindows in lib/server/chunked-logs.ts
+ * but with the browser's tighter window, which that shared helper hard-codes at
+ * 90k and offers no way to lower.
+ */
+async function scanLogsInWindows<T>(
+  fromBlock: bigint,
+  toBlock: bigint,
+  query: (fromBlock: bigint, toBlock: bigint) => Promise<T[]>,
+): Promise<T[]> {
+  if (toBlock < fromBlock) return [];
+  const windows: Array<[bigint, bigint]> = [];
+  for (let from = fromBlock; from <= toBlock; from += CLIENT_LOG_WINDOW) {
+    const end = from + CLIENT_LOG_WINDOW - 1n;
+    windows.push([from, end > toBlock ? toBlock : end]);
+  }
+  const out: T[] = [];
+  for (let i = 0; i < windows.length; i += CLIENT_LOG_CONCURRENCY) {
+    const batch = windows.slice(i, i + CLIENT_LOG_CONCURRENCY);
+    const results = await Promise.all(batch.map(([f, t]) => query(f, t)));
+    for (const r of results) out.push(...r);
+  }
+  return out;
+}
+
+/**
+ * Discover every pool.
+ *
+ * Pools are numbered 1..poolCount and never deleted, so reading poolCount and
+ * enumerating that range yields the complete, authoritative pool list in a
+ * single state read - and it is the only discovery path that works from the
+ * browser, whose RPCs cannot serve deploy-era PoolCreated logs (blockdaemon has
+ * pruned them; rpc.testnet.arc.network rate-limits the hundreds of windows a
+ * full historical scan needs). Measured 2026-08-20: enumeration returns the
+ * full list in ~0.5s where a windowed log scan takes ~3.3s before falling
+ * through to enumeration anyway.
+ *
+ * The windowed PoolCreated scan is the fallback, reached only when poolCount
+ * itself cannot be read. It covers environments where an archival RPC (a
+ * server-side ARC_RPC_URL) can serve the logs, and is windowed under the public
+ * RPC's range cap so it never repeats the original "requested range too large"
+ * failure of a single fromBlock:0 call.
  */
 export async function fetchPools(): Promise<PoolInfo[]> {
   const address = getHealthPoolsAddress();
@@ -421,27 +482,42 @@ export async function fetchPools(): Promise<PoolInfo[]> {
   const client = getArcPublicClient();
 
   let ids: bigint[] = [];
+  let haveCount = false;
   try {
-    const logs = await client.getLogs({
-      address,
-      event: poolCreatedEvent,
-      fromBlock: 0n,
-      toBlock: "latest",
-    });
-    ids = logs
-      .map((log) => log.args.poolId)
-      .filter((id): id is bigint => id !== undefined);
-  } catch {
-    ids = [];
-  }
-
-  if (ids.length === 0) {
     const count = await client.readContract({
       address,
       abi: healthPoolsAbi,
       functionName: "poolCount",
     });
     ids = Array.from({ length: Number(count) }, (_, i) => BigInt(i + 1));
+    haveCount = true;
+  } catch {
+    haveCount = false;
+  }
+
+  // Only fall through to the log scan when poolCount could not be read. A
+  // successful poolCount of 0 means there genuinely are no pools; it must not
+  // trigger a pointless historical scan.
+  if (!haveCount) {
+    try {
+      const latest = await client.getBlockNumber();
+      const logs = await scanLogsInWindows(
+        poolsScanFromBlock(),
+        latest,
+        (fromBlock, toBlock) =>
+          client.getLogs({
+            address,
+            event: poolCreatedEvent,
+            fromBlock,
+            toBlock,
+          }),
+      );
+      ids = logs
+        .map((log) => log.args.poolId)
+        .filter((id): id is bigint => id !== undefined);
+    } catch {
+      ids = [];
+    }
   }
 
   const unique = Array.from(new Set(ids.map((id) => id.toString()))).map(
