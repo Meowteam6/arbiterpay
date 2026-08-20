@@ -61,36 +61,53 @@ type LinkPhase =
 
 /** Tap-to-copy for the finished challenge link. A share link is not a wallet
  *  address, so it wears its own control rather than borrowing CopyAddressButton's
- *  address-specific labels. */
+ *  address-specific labels. Mirrors CopyAddressButton's failure handling: some
+ *  mobile in-app browsers and non-secure contexts expose no clipboard API, so a
+ *  silent no-op would strand the challenger with an unshareable link. On failure
+ *  it says so and points at the full link, which is shown here to select by hand. */
 function CopyLink({ url }: { url: string }) {
-  const [copied, setCopied] = useState(false);
+  const [state, setState] = useState<"idle" | "copied" | "failed">("idle");
   const copy = () => {
     const clipboard =
       typeof navigator === "undefined" ? undefined : navigator.clipboard;
-    if (clipboard === undefined) return;
+    if (clipboard === undefined) {
+      setState("failed");
+      return;
+    }
     clipboard.writeText(url).then(
       () => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 2500);
+        setState("copied");
+        setTimeout(() => setState("idle"), 2500);
       },
-      () => setCopied(false),
+      () => setState("failed"),
     );
   };
   return (
-    <button
-      type="button"
-      onClick={copy}
-      title="Tap to copy the challenge link"
-      className="flex min-h-11 w-full items-center justify-between gap-3 rounded-xl border border-edge bg-surface-raised px-3 py-3 text-left font-mono text-xs text-foreground/80 hover:border-accent/50 hover:text-foreground"
-    >
-      <span className="break-all">{url}</span>
-      <span
-        aria-live="polite"
-        className="shrink-0 font-sans text-xs font-semibold uppercase tracking-wide text-accent"
+    <>
+      <button
+        type="button"
+        onClick={copy}
+        title="Tap to copy the challenge link"
+        className="flex min-h-11 w-full items-center justify-between gap-3 rounded-xl border border-edge bg-surface-raised px-3 py-3 text-left font-mono text-xs text-foreground/80 hover:border-accent/50 hover:text-foreground"
       >
-        {copied ? "Copied" : "Tap to copy"}
-      </span>
-    </button>
+        <span className="break-all">{url}</span>
+        <span
+          aria-live="polite"
+          className="shrink-0 font-sans text-xs font-semibold uppercase tracking-wide text-accent"
+        >
+          {state === "copied"
+            ? "Copied"
+            : state === "failed"
+              ? "Copy failed"
+              : "Tap to copy"}
+        </span>
+      </button>
+      {state === "failed" ? (
+        <p aria-live="polite" className="text-xs text-muted">
+          Copying is blocked in this browser - select the link above by hand.
+        </p>
+      ) : null}
+    </>
   );
 }
 

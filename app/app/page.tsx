@@ -60,25 +60,25 @@ export default function Home() {
         <div className="mt-6 flex flex-col items-center justify-center gap-3 sm:flex-row">
           <Link
             href="/pools"
-            className="text-sm font-medium text-muted underline-offset-4 hover:text-foreground hover:underline"
+            className="py-2 text-sm font-medium text-muted underline-offset-4 hover:text-foreground hover:underline"
           >
             or browse the live pools
           </Link>
           <Link
             href="/pools/create"
-            className="text-sm font-medium text-muted underline-offset-4 hover:text-foreground hover:underline"
+            className="py-2 text-sm font-medium text-muted underline-offset-4 hover:text-foreground hover:underline"
           >
             sponsoring instead? put up a bounty
           </Link>
           <Link
             href="/feed"
-            className="text-sm font-medium text-muted underline-offset-4 hover:text-foreground hover:underline"
+            className="py-2 text-sm font-medium text-muted underline-offset-4 hover:text-foreground hover:underline"
           >
             see who got paid
           </Link>
           <Link
             href="/handle"
-            className="text-sm font-medium text-muted underline-offset-4 hover:text-foreground hover:underline"
+            className="py-2 text-sm font-medium text-muted underline-offset-4 hover:text-foreground hover:underline"
           >
             claim your handle
           </Link>

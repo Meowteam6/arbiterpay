@@ -39,11 +39,14 @@ export const FAUCET_GRANT_UUSDC = 500_000n;
 export const FAUCET_COOLDOWN_MS = DAY_MS;
 
 /**
- * Total the faucet may hand out across every address inside one window: 5.00
- * USDC. This is the guard that actually bounds a scripted attack, because
- * fresh addresses are free and the per-address cooldown alone is not a limit.
+ * Total the faucet may hand out across every address inside one window: 30.00
+ * USDC (event capacity: ~60 first-time wallets/day at 0.50 each). This is the
+ * guard that actually bounds a scripted attack, because fresh addresses are
+ * free and the per-address cooldown alone is not a limit. It is additionally
+ * bounded by the live treasury balance via treasuryCanCover, so raising it
+ * never hands out more USDC than the treasury actually holds.
  */
-export const FAUCET_DAILY_BUDGET_UUSDC = 5_000_000n;
+export const FAUCET_DAILY_BUDGET_UUSDC = 30_000_000n;
 
 /**
  * Sub-ceiling for AUTOMATIC faucet grants, on the same daily counter: 2.50
@@ -58,7 +61,7 @@ export const FAUCET_DAILY_BUDGET_UUSDC = 5_000_000n;
  * is a strictly LOWER ceiling than the daily budget, never a raise. It must
  * stay a whole number of grants and strictly below the daily budget.
  */
-export const FAUCET_AUTO_BUDGET_UUSDC = 2_500_000n;
+export const FAUCET_AUTO_BUDGET_UUSDC = 15_000_000n;
 
 /** Real Arc USDC one address may move out of the treasury per window: 2.00. */
 export const WITHDRAW_DAILY_CAP_UUSDC = 2_000_000n;
