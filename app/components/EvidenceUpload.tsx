@@ -281,6 +281,11 @@ function EvidenceUploadInner({
         });
 
         if (TERMINAL.includes(last)) {
+          // A resubmit lands its fresh terminal here. PoolDetail's claim rail
+          // stops polling once a claim is terminal, so after a rejected attempt
+          // it would keep showing the prior verdict even as this run pays out;
+          // nudge it to re-read the ledger so the rail matches the workbench.
+          await queryClient.invalidateQueries({ queryKey: ["claim-ledger"] });
           if (last === "paid" || last === "recorded") {
             await queryClient.invalidateQueries({ queryKey: ["pool"] });
             await queryClient.invalidateQueries({ queryKey: ["participant"] });
@@ -727,11 +732,25 @@ function EvidenceUploadInner({
         ) : null}
 
         {status.runStatus === "no-pay" && failureMode === "goal-missed" ? (
-          <div className="rounded-xl border border-edge bg-surface-raised p-4">
-            <p className="text-base font-semibold">Not paid.</p>
-            <p className="mt-1 text-sm text-foreground/80">
-              The document was read fine. It does not show the goal being met.
-            </p>
+          <div className="space-y-3">
+            <div className="rounded-xl border border-edge bg-surface-raised p-4">
+              <p className="text-base font-semibold">Not paid.</p>
+              <p className="mt-1 text-sm text-foreground/80">
+                The document was read fine. It does not show the goal being met.
+                If you have a different record that does - the real one, not a
+                sample - submit it and SPOTTER runs the check again.
+              </p>
+            </div>
+            {/* A rejected read is not a dead end: a fresh upload submits a new
+             *  attester job under the same joined claim, so the run loop buys a
+             *  fresh read and reaches a fresh verdict without re-joining. */}
+            <button
+              type="button"
+              onClick={resetUpload}
+              className="w-full rounded-xl border border-accent/50 bg-surface-raised px-5 py-3 text-sm font-semibold text-accent hover:bg-accent-deep"
+            >
+              Submit new evidence
+            </button>
           </div>
         ) : null}
 
