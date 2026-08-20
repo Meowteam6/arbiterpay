@@ -1,6 +1,7 @@
 "use client";
 
 import { useState } from "react";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useQueryClient } from "@tanstack/react-query";
 import { DYNAMIC_CONFIGURED } from "@/lib/config";
@@ -11,11 +12,16 @@ import {
   type EvidenceType,
 } from "@/lib/contract";
 import { useEmbeddedWallet } from "@/lib/wallet";
+import { useWalletAuth } from "@/lib/useWalletAuth";
+import { authBlockReason, fetchWithWalletAuth } from "@/lib/client-auth";
 import { useUsdcDeposit } from "@/lib/useUsdcDeposit";
 import { isEconomicallyDeadConfig } from "@/lib/pool-lifecycle";
 import { resolveNewPoolId } from "@/lib/resolve-pool-id";
+import ShareChallenge from "@/components/ShareChallenge";
 import { ArcTxLink, ErrorNote } from "@/components/ui";
 import SignInGate from "@/components/SignInGate";
+
+type Visibility = "public" | "private";
 
 const DURATION_OPTIONS: { label: string; days: number }[] = [
   { label: "1 day", days: 1 },
@@ -69,10 +75,21 @@ const DOC_TEMPLATES: DocTemplate[] = [
   },
 ];
 
+/** The finished-and-private screen: a sponsor pool created private is not sent
+ *  to the guessable /pools/[id]; the owner gets its unguessable /p/[token]. */
+interface PrivateReveal {
+  poolId: string;
+  /** Relative /p/[token] path, for the in-app link. */
+  sharePath: string;
+  /** Absolute link, for copy and share. */
+  shareUrl: string;
+}
+
 function CreatePoolInner() {
   const router = useRouter();
   const queryClient = useQueryClient();
-  const { ready, authenticated } = useEmbeddedWallet();
+  const { ready, authenticated, address } = useEmbeddedWallet();
+  const requestAuth = useWalletAuth();
   const { status, busy, reset, runUsdcDeposit } = useUsdcDeposit();
 
   const [evidenceType, setEvidenceType] = useState<EvidenceType>("wearable");
@@ -82,8 +99,11 @@ function CreatePoolInner() {
   const [durationDays, setDurationDays] = useState<number>(7);
   const [bountyModel, setBountyModel] = useState<number>(0);
   const [initialFunding, setInitialFunding] = useState<string>("");
+  const [visibility, setVisibility] = useState<Visibility>("public");
   const [formError, setFormError] = useState<string | null>(null);
   const [redirecting, setRedirecting] = useState<boolean>(false);
+  const [linking, setLinking] = useState<boolean>(false);
+  const [reveal, setReveal] = useState<PrivateReveal | null>(null);
 
   const poolsAddress = getHealthPoolsAddress();
   if (poolsAddress === null) {
@@ -188,10 +208,85 @@ function CreatePoolInner() {
       setRedirecting(true);
       await queryClient.invalidateQueries({ queryKey: ["pools"] });
       const newId = await resolveNewPoolId(depositHash);
+
+      if (visibility === "private") {
+        // A private sponsor pool must never be handed out as the guessable
+        // /pools/<n>. Mark it private - which mints an unguessable /p/[token] -
+        // and reveal that link instead of redirecting. The pool is already
+        // funded and live; if this signed write fails, the money is safe and
+        // the pool is simply still public, so every failure path names where it
+        // is.
+        setRedirecting(false);
+        setLinking(true);
+        if (address === null) {
+          setFormError(
+            `Your wallet disconnected before the private link could be signed. Your pool is live at /pools/${newId.toString()} - it is public for now, and you can make it private from the pool page.`,
+          );
+          setLinking(false);
+          return;
+        }
+        const sent = await fetchWithWalletAuth(
+          `/api/pools/${newId.toString()}/visibility`,
+          {
+            method: "POST",
+            headers: { "content-type": "application/json" },
+            body: JSON.stringify({ address, visibility: "private" }),
+          },
+          requestAuth,
+        );
+        if (!sent.response.ok) {
+          if (sent.auth.kind !== "ok") {
+            setFormError(
+              authBlockReason(sent.auth) ??
+                "Sign with your wallet to mint the private link.",
+            );
+          } else {
+            const body = (await sent.response.json().catch(() => ({}))) as {
+              error?: string;
+            };
+            setFormError(
+              `${body.error ?? "Could not make the pool private."} Your pool is live at /pools/${newId.toString()} and is public for now - you can make it private from the pool page.`,
+            );
+          }
+          setLinking(false);
+          return;
+        }
+        const body = (await sent.response.json()) as {
+          sharePath?: string | null;
+        };
+        const sharePath =
+          typeof body.sharePath === "string" && body.sharePath !== ""
+            ? body.sharePath
+            : null;
+        if (sharePath === null) {
+          setFormError(
+            `The pool was made private but its link came back empty. It is live at /pools/${newId.toString()}.`,
+          );
+          setLinking(false);
+          return;
+        }
+        const origin =
+          typeof window === "undefined" ? "" : window.location.origin;
+        setReveal({
+          poolId: newId.toString(),
+          sharePath,
+          shareUrl: `${origin}${sharePath}`,
+        });
+        setLinking(false);
+        return;
+      }
+
       router.push(`/pools/${newId.toString()}`);
     } catch {
-      // useUsdcDeposit already captured the error into status; surface there.
+      // useUsdcDeposit already captured any deposit error into status; surface
+      // there. A post-deposit throw lands as a generic form error.
       setRedirecting(false);
+      setLinking(false);
+      if (status.kind !== "error") {
+        setFormError(
+          "Could not finish creating the pool. Check the pools list before retrying so you do not fund it twice.",
+        );
+      }
     }
   };
 
@@ -200,11 +295,76 @@ function CreatePoolInner() {
       ? "Approving USDC..."
       : status.kind === "depositing"
         ? "Creating pool..."
-        : redirecting
-          ? "Opening your pool..."
-          : authenticated
-            ? "Approve funding and create pool"
-            : "Sign in to create";
+        : linking
+          ? "Minting the private link..."
+          : redirecting
+            ? "Opening your pool..."
+            : authenticated
+              ? visibility === "private"
+                ? "Create private pool"
+                : "Approve funding and create pool"
+              : "Sign in to create";
+
+  if (reveal !== null) {
+    return (
+      <div className="space-y-5">
+        <div className="space-y-2 rounded-2xl border border-accent/40 bg-accent-deep/40 p-5">
+          <p className="text-base font-semibold text-accent">
+            Private pool created. It is off the board.
+          </p>
+          <p className="text-sm text-foreground/80">
+            It will not appear on the pools list or the payout feed. Only people
+            you send the link below can open it and join.
+          </p>
+        </div>
+
+        <div className="space-y-3">
+          <p className="text-xs font-semibold uppercase tracking-wide text-muted">
+            Your private link
+          </p>
+          <p className="break-all rounded-xl border border-edge bg-surface-raised px-3 py-3 font-mono text-xs text-foreground/80">
+            {reveal.shareUrl}
+          </p>
+          <ShareChallenge
+            url={reveal.shareUrl}
+            title="A private pool on GoHealthMe"
+            message="Here is the private link to my pool on GoHealthMe:"
+            emailSubject="A private pool on GoHealthMe"
+            shareLabel="Share the link"
+          />
+          <p className="text-xs text-muted">
+            Anyone with this link can open the pool, so send it only to the
+            people it is for. It is not listed anywhere and cannot be guessed.
+          </p>
+        </div>
+
+        <div className="flex flex-wrap gap-3">
+          <Link
+            href={reveal.sharePath}
+            className="rounded-xl border border-edge px-5 py-3 text-sm font-medium text-muted hover:text-foreground"
+          >
+            Open the pool
+          </Link>
+          <button
+            type="button"
+            onClick={() => {
+              reset();
+              setReveal(null);
+              setInitiative("");
+              setGoalSpec("");
+              setEntryFee("");
+              setInitialFunding("");
+              setVisibility("public");
+              setFormError(null);
+            }}
+            className="rounded-xl border border-edge px-5 py-3 text-sm font-medium text-muted hover:text-foreground"
+          >
+            Create another
+          </button>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="space-y-6">
@@ -416,11 +576,50 @@ function CreatePoolInner() {
           </div>
         </fieldset>
 
+        <fieldset className="block text-sm font-medium">
+          <legend>Who can see this pool</legend>
+          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={() => setVisibility("public")}
+              className={`rounded-xl border p-3 text-left ${
+                visibility === "public"
+                  ? "border-accent/50 bg-accent-deep text-accent"
+                  : "border-edge bg-surface-raised text-muted hover:text-foreground"
+              }`}
+            >
+              <span className="block font-semibold">Public</span>
+              <span className="block text-xs font-normal">
+                Listed on the pools board and the payout feed. Anyone can find
+                and join it.
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setVisibility("private")}
+              className={`rounded-xl border p-3 text-left ${
+                visibility === "private"
+                  ? "border-accent/50 bg-accent-deep text-accent"
+                  : "border-edge bg-surface-raised text-muted hover:text-foreground"
+              }`}
+            >
+              <span className="block font-semibold">Private</span>
+              <span className="block text-xs font-normal">
+                Unlisted. You get an unguessable link to share, and only people
+                who have it can open the pool.
+              </span>
+            </button>
+          </div>
+          <span className="mt-1 block text-xs font-normal text-muted">
+            You can change this any time from the pool page.
+          </span>
+        </fieldset>
+
         <SignInGate note="Sign in to create this pool.">
           {(openSignIn) => (
             <button
               type="button"
-              disabled={!ready || busy || redirecting}
+              disabled={!ready || busy || redirecting || linking}
               onClick={() => {
                 if (!authenticated) {
                   openSignIn();
@@ -442,6 +641,14 @@ function CreatePoolInner() {
               {status.kind === "approving"
                 ? "approving USDC for the pool"
                 : "creating the pool on Arc"}
+            </p>
+          </div>
+        ) : null}
+
+        {linking ? (
+          <div className="rounded-xl border border-edge bg-surface-raised p-4 text-sm">
+            <p className="font-medium">
+              Pool is funded and live. Sign to mint your private link...
             </p>
           </div>
         ) : null}

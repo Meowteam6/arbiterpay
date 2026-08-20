@@ -19,7 +19,10 @@ import {
   toNamedPayouts,
   type NamedFeedInput,
 } from "@/lib/server/agent/named-feed";
-import { isChallengePool } from "@/lib/server/challenge-pool";
+import {
+  resolvePoolVisibilities,
+  type PoolVisibility,
+} from "@/lib/server/pool-visibility";
 import { resolveProfiles } from "@/lib/server/social-profile";
 import { jsonError, newCorrelationId, safeError } from "@/lib/server/http";
 
@@ -42,23 +45,27 @@ export async function GET() {
       }),
     );
 
-    // Withhold private challenge pools from the public feed. A row with no pool
-    // linkage predates the poolId field - and predates challenges entirely - so
-    // it is a public claim and stays. A row with a pool id is checked and
-    // dropped when that pool is a challenge (or when the read is uncertain:
-    // isChallengePool excludes on doubt). Flags are resolved once per unique
-    // pool id and cached, so the feed never refetches per row.
+    // Withhold private pools from the public feed. A row with no pool linkage
+    // predates the poolId field - and predates challenges entirely - so it is a
+    // public claim and stays. A row with a pool id is dropped unless that pool
+    // resolves to PUBLIC (store-first, initiative default, see
+    // resolvePoolVisibilities). Visibility is resolved once per unique pool id.
+    // A genuine store outage makes the resolver throw; the feed then excludes
+    // EVERY pool-linked row (exclude on doubt) and keeps only the legacy
+    // null-pool claims - a leak-free degrade, never a fake payout wall.
     const poolIds = Array.from(
       new Set(rows.map((r) => r.poolId).filter((p): p is string => p !== null)),
     );
-    const challengeFlag = new Map<string, boolean>();
-    await Promise.all(
-      poolIds.map(async (poolId) => {
-        challengeFlag.set(poolId, await isChallengePool(poolId));
-      }),
-    );
+    let visibility: Map<string, PoolVisibility>;
+    try {
+      visibility = await resolvePoolVisibilities(poolIds);
+    } catch {
+      visibility = new Map(poolIds.map((poolId) => [poolId, "private"]));
+    }
     const inputs: NamedFeedInput[] = rows
-      .filter((r) => r.poolId === null || challengeFlag.get(r.poolId) !== true)
+      .filter(
+        (r) => r.poolId === null || visibility.get(r.poolId) === "public",
+      )
       .map((r) => r.input);
 
     const addresses = inputs
