@@ -3,6 +3,7 @@ import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import Providers from "./providers";
 import Header from "@/components/Header";
+import HelperWidget from "@/components/HelperWidget";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -45,6 +46,7 @@ export default function RootLayout({
             GoHealthMe — settled by SPOTTER on Arc testnet. Your health data
             never touches the chain.
           </footer>
+          <HelperWidget />
         </Providers>
       </body>
     </html>

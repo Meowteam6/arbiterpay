@@ -405,7 +405,10 @@ export default function PoolDetail({ id }: { id: string }) {
           </button>
         </div>
       ) : null}
-      <section className="rounded-2xl border border-accent/40 bg-surface p-5">
+      <section
+        id="proof-upload"
+        className="rounded-2xl border border-accent/40 bg-surface p-5"
+      >
         {claimPathPending ? (
           <div className="space-y-3">
             <Skeleton className="h-6 w-40" />

@@ -105,7 +105,13 @@ export function inlineCredentials(): InlineCredentials | null {
   };
 }
 
-function vertexClient(): GoogleGenAI | null {
+/**
+ * The shared Vertex/Gemini client, or null when Gemini is not configured.
+ * Exported so other reasoning surfaces (the onboarding Ask helper) reuse this
+ * exact client, its cache, and its credentials path rather than standing up a
+ * second SDK instance. The model id is GEMINI_MODEL above.
+ */
+export function vertexClient(): GoogleGenAI | null {
   const project = optionalEnv("GOOGLE_CLOUD_PROJECT", "");
   if (project === "") return null;
   if (cachedClient === null) {
