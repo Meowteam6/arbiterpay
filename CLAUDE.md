@@ -113,6 +113,15 @@ The bar is *"genuinely agent-driven — no human manual checkout."*
 
 Using their scaffold makes the integration read as native, which matters for proof 1.
 
+## No stopgaps — this is a live product, not a demo
+
+GoHealthMe has real users and is heading into a fundraise. Ship production quality, not proof-of-concept behaviour. Andre has flagged demo/POC shortcuts as the thing that makes this product fragile — treat this section as binding.
+
+- **Ship the whole true fix, or flag it — never a silent band-aid.** Fix the actual root cause. If the true fix is out of scope, needs infrastructure, or needs a decision, STOP and tell Andre plainly what the real fix is and why it is not done. A "graceful degradation" that leaves a feature non-functional is a stopgap; if you ship one to unblock, name it as a stopgap out loud, every time, and say what the durable fix is.
+- **Never claim something is fixed until you have seen it work.** Assert on real behaviour — a live response returning real data, a real on-chain delta, a passing end-to-end — not on "it built" or "it should work". Do not call anything a "real fix" until verified against the running system.
+- **Stopgaps compound into fragility.** Each unflagged band-aid hides the next bug. Prefer the durable fix; an interim measure is a flagged, tracked exception, not the default.
+- **A degraded path must be visible.** If a surface can only partially work, both the UI and Andre are told what does not work and what the real fix is — no fake zeros, no pretending.
+
 ## Hard rules
 
 - **Never send raw health data to Gemini or any marketplace service.** Only derived verdicts and pool state. The TEE privacy boundary in `app/lib/server/judge.ts` is the product's core claim.
