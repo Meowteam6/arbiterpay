@@ -385,8 +385,15 @@ function CreatePoolInner() {
                 </span>
                 <span className="block text-xs font-normal text-muted">
                   Each verified achiever receives the same fixed payout, a
-                  multiple of the entry fee. Needs an entry fee above zero.
+                  multiple of the entry fee.
                 </span>
+                {feeIsZero ? (
+                  <span className="mt-1 block text-xs font-normal text-warning">
+                    Enter an entry fee above 0 to use a fixed bounty. At a zero
+                    fee it would pay every achiever nothing, so the pool splits
+                    the pot instead.
+                  </span>
+                ) : null}
               </span>
             </label>
             <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-edge bg-surface-raised p-3">
