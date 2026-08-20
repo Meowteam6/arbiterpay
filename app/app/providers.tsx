@@ -118,19 +118,13 @@ export default function Providers({ children }: { children: ReactNode }) {
         // RemoveWallets(["metamask"]) would leave that one showing.
         walletsFilter: (wallets) =>
           wallets.filter((w) => !w.key.toLowerCase().startsWith("metamask")),
-        // useMetamaskSdk: true routes MetaMask through its multichain "connect"
-        // SDK, which does NOT bind the wallet into Dynamic state under
-        // connect-only — primaryWallet/userWallets stay empty for MetaMask. That
-        // is exactly what we want now: MetaMask is filtered out of the login
-        // modal, and the intended path is email -> embedded (or Coinbase /
-        // WalletConnect for bring-your-own). The prior value (false) forced the
-        // classic injected/EIP-6963 connector, whose silent getConnectedAccounts
-        // reconnect let an already-approved MetaMask auto-bind and hijack the
-        // session on page load, before the email screen ever showed — bypassing
-        // walletsFilter entirely (the filter governs the modal list, not the
-        // injected auto-reconnect). true stops MetaMask from becoming the
-        // session; email and the non-MetaMask external wallets are unaffected.
-        useMetamaskSdk: true,
+        // Dynamic's default (useMetamaskSdk: true) routes MetaMask through its
+        // new multichain "connect" SDK, which establishes a MetaMask connection
+        // but does NOT bind the wallet into Dynamic state in connect-only mode —
+        // primaryWallet/userWallets stay empty, so the app never sees the wallet
+        // and sign-in never flips. Forcing the classic injected/EIP-6963
+        // connector makes primaryWallet populate reliably.
+        useMetamaskSdk: false,
         overrides: { evmNetworks: [arcEvmNetwork] },
         // Don't show Dynamic's per-transaction confirmation modal for the
         // embedded (email) wallet — email-login users sign without an extra
