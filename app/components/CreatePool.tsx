@@ -7,8 +7,8 @@ import { DYNAMIC_CONFIGURED } from "@/lib/config";
 import {
   getHealthPoolsAddress,
   parseUsdc,
-  withDocMarker,
-  type EvidenceType,
+  withProofPolicy,
+  type Modality,
 } from "@/lib/contract";
 import { useEmbeddedWallet } from "@/lib/wallet";
 import { useUsdcDeposit } from "@/lib/useUsdcDeposit";
@@ -75,7 +75,12 @@ function CreatePoolInner() {
   const { ready, authenticated } = useEmbeddedWallet();
   const { status, busy, reset, runUsdcDeposit } = useUsdcDeposit();
 
-  const [evidenceType, setEvidenceType] = useState<EvidenceType>("wearable");
+  // The proof floor (highest-trust modality required) and whether the pool ALSO
+  // opts into accepting self-reported photos. Default floor is wearable with no
+  // self-reported opt-in, so a pool created without touching this control
+  // serializes to a byte-identical unmarked goalSpec, exactly as before.
+  const [floor, setFloor] = useState<Modality>("wearable");
+  const [acceptSelfReported, setAcceptSelfReported] = useState<boolean>(false);
   const [initiative, setInitiative] = useState<string>("");
   const [goalSpec, setGoalSpec] = useState<string>("");
   const [entryFee, setEntryFee] = useState<string>("");
@@ -96,7 +101,7 @@ function CreatePoolInner() {
   }
 
   const applyTemplate = (template: DocTemplate) => {
-    setEvidenceType("document");
+    setFloor("document");
     setInitiative(template.initiative);
     setGoalSpec(template.goal);
     setEntryFee(template.entryFee);
@@ -153,10 +158,19 @@ function CreatePoolInner() {
     const periodStart = now;
     const periodEnd = now + BigInt(durationDays * SECONDS_PER_DAY);
 
-    const encodedGoalSpec =
-      evidenceType === "document"
-        ? withDocMarker(goalSpec.trim())
-        : goalSpec.trim();
+    // Serialize the proof policy into the goalSpec marker. A pure wearable floor
+    // stays unmarked and a pure document floor stays "[doc]" (byte-identical to
+    // before); only a self-reported floor or opt-in emits a "[proof=...]" marker.
+    const accepted: Modality[] =
+      floor === "self-reported"
+        ? ["self-reported"]
+        : acceptSelfReported
+          ? [floor, "self-reported"]
+          : [floor];
+    const encodedGoalSpec = withProofPolicy(goalSpec.trim(), {
+      floor,
+      accepted,
+    });
 
     // A fixed bounty pays entryFee * multiplier, so at a zero fee it settles to
     // zero for everyone: force the split-pot model when the fee is zero, then
@@ -221,12 +235,12 @@ function CreatePoolInner() {
       <div className="space-y-4 rounded-2xl border border-edge bg-surface p-5">
         <fieldset className="block text-sm font-medium">
           <legend>How is the goal verified</legend>
-          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+          <div className="mt-2 grid gap-2 sm:grid-cols-3">
             <button
               type="button"
-              onClick={() => setEvidenceType("wearable")}
+              onClick={() => setFloor("wearable")}
               className={`rounded-xl border p-3 text-left ${
-                evidenceType === "wearable"
+                floor === "wearable"
                   ? "border-accent/50 bg-accent-deep text-accent"
                   : "border-edge bg-surface-raised text-muted hover:text-foreground"
               }`}
@@ -238,9 +252,9 @@ function CreatePoolInner() {
             </button>
             <button
               type="button"
-              onClick={() => setEvidenceType("document")}
+              onClick={() => setFloor("document")}
               className={`rounded-xl border p-3 text-left ${
-                evidenceType === "document"
+                floor === "document"
                   ? "border-accent/50 bg-accent-deep text-accent"
                   : "border-edge bg-surface-raised text-muted hover:text-foreground"
               }`}
@@ -250,10 +264,43 @@ function CreatePoolInner() {
                 Verified from an uploaded record like a flu shot or lab result.
               </span>
             </button>
+            <button
+              type="button"
+              onClick={() => setFloor("self-reported")}
+              className={`rounded-xl border p-3 text-left ${
+                floor === "self-reported"
+                  ? "border-warning/50 bg-warning/10 text-warning"
+                  : "border-edge bg-surface-raised text-muted hover:text-foreground"
+              }`}
+            >
+              <span className="block font-semibold">Self-reported</span>
+              <span className="block text-xs font-normal">
+                A photo or screenshot. Low-trust, still in development. We cannot
+                confirm a photo is real, recent, or yours. Use only when you
+                accept unverified proof.
+              </span>
+            </button>
           </div>
+          {floor !== "self-reported" ? (
+            <label className="mt-2 flex cursor-pointer items-start gap-3 rounded-xl border border-edge bg-surface-raised p-3">
+              <input
+                type="checkbox"
+                checked={acceptSelfReported}
+                onChange={(e) => setAcceptSelfReported(e.target.checked)}
+                className="mt-1"
+              />
+              <span className="text-xs font-normal text-muted">
+                Also accept self-reported photos/screenshots (low-trust). Adds a
+                second, unverified proof path beside the{" "}
+                {floor === "document" ? "document" : "wearable"} one. Verified
+                claims stay verified; self-reported ones are labeled as such and
+                pay at 1x only.
+              </span>
+            </label>
+          ) : null}
         </fieldset>
 
-        {evidenceType === "document" ? (
+        {floor === "document" ? (
           <div className="block text-sm font-medium">
             Preventive-care templates
             <div className="mt-2 flex flex-wrap gap-2">
@@ -293,9 +340,11 @@ function CreatePoolInner() {
           Goal
           <textarea
             placeholder={
-              evidenceType === "document"
+              floor === "document"
                 ? "Get your annual flu shot and upload your vaccination record."
-                : "Sleep at least 7 hours every night for the period."
+                : floor === "self-reported"
+                  ? "Post a gym selfie every day for a week."
+                  : "Sleep at least 7 hours every night for the period."
             }
             value={goalSpec}
             onChange={(e) => setGoalSpec(e.target.value)}
@@ -303,9 +352,11 @@ function CreatePoolInner() {
             className="mt-1 w-full rounded-xl border border-edge bg-surface-raised px-3 py-3 text-base"
           />
           <span className="mt-1 block text-xs text-muted">
-            {evidenceType === "document"
+            {floor === "document"
               ? "Describe what participants must upload. Saved as a document goal so the right verifier and badge are used."
-              : "The human-readable goal participants commit to."}
+              : floor === "self-reported"
+                ? "Describe the photo or screenshot participants must post. Saved as a self-reported goal - low-trust and never marked verified."
+                : "The human-readable goal participants commit to."}
           </span>
         </label>
 

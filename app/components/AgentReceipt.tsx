@@ -307,10 +307,12 @@ export default function AgentReceipt({
   ledger: LedgerEntry[];
   /** Which evidence path this receipt belongs to. Defaults to "document" so
    *  every existing caller is unchanged; the wearable path opts in so the
-   *  privacy footer tells the truth. Only the document path runs inside the
-   *  confidential enclave (lib/server/judge.ts); the wearable path reads the
-   *  Junction summary on SPOTTER's own server, so it must not claim otherwise. */
-  evidenceKind?: "document" | "wearable";
+   *  privacy footer tells the truth. Only the document/self-reported paths run
+   *  inside the confidential enclave (lib/server/judge.ts); the wearable path
+   *  reads the Junction summary on SPOTTER's own server, so it must not claim
+   *  otherwise. The self-reported path is the same enclave read but the footer
+   *  states plainly that the proof is low-trust and unverified. */
+  evidenceKind?: "document" | "wearable" | "self-reported";
 }) {
   const receipt = projectReceipt(ledger);
   const items = collapseErrors(receipt.rows);
@@ -342,7 +344,11 @@ export default function AgentReceipt({
             case "verdict":
               return (
                 <li key={item.key} className="animate-rise-in pl-7">
-                  <Verdict verified={row.verified} confidence={row.confidence} />
+                  <Verdict
+                    verified={row.verified}
+                    confidence={row.confidence}
+                    selfReported={row.selfReported}
+                  />
                   <p className="mt-1 text-sm text-foreground/80">
                     {row.escalation ? "second opinion: " : ""}
                     {row.reason}
@@ -425,7 +431,9 @@ export default function AgentReceipt({
       <p className="mt-2 text-xs text-muted">
         {evidenceKind === "wearable"
           ? "Your wearable data stayed server-side and was never written on-chain. Only the verdict was recorded."
-          : "Your document never left the secure enclave. SPOTTER only ever saw the verdict."}
+          : evidenceKind === "self-reported"
+            ? "Your photo went to the enclave only for the read and was never stored. Self-reported proof is low-trust and still in development: we cannot confirm it is real, recent, or yours, so it is never marked verified."
+            : "Your document never left the secure enclave. SPOTTER only ever saw the verdict."}
       </p>
     </div>
   );

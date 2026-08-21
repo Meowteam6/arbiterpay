@@ -39,6 +39,11 @@ export interface PublicFeedClaim {
   spends: PublicFeedSpend[];
   recordTxs: { resultTx: string | null; registryTx: string | null } | null;
   settle: PublicFeedSettle | null;
+  /** True when the claim rests on self-reported (photo/screenshot) evidence,
+   *  the low-trust tier. A machine-state boolean like `decision` — it carries
+   *  no health-derived prose — so the public feed may show it. The feed must
+   *  never present a self-reported win as "verified". */
+  selfReported: boolean;
 }
 
 /** Runtime string check. The store returns whatever JSON it holds, so the
@@ -58,9 +63,15 @@ export function toPublicFeedClaim(
   let decision: "pay" | "no-pay" | null = null;
   let recordTxs: PublicFeedClaim["recordTxs"] = null;
   let settle: PublicFeedSettle | null = null;
+  let selfReported = false;
 
   for (const entry of ledger) {
     switch (entry.kind) {
+      case "verdict":
+        // Only the tier flag crosses the redaction boundary here — never the
+        // verdict reason or any other prose, which stay server-side.
+        if (entry.selfReported === true) selfReported = true;
+        break;
       case "spend": {
         // The spend note stays server-side: it carries the escalation line.
         // A corrupt amount is dropped whole rather than crashing the feed.
@@ -98,12 +109,13 @@ export function toPublicFeedClaim(
         };
         break;
       }
-      // plan, verdict, and error entries carry prose (goal specs, model
-      // reasons, engineer diagnostics) and never leave the server.
+      // plan and error entries carry prose (goal specs, engineer diagnostics)
+      // and never leave the server. verdict is handled above for its tier flag
+      // only; its reason prose is likewise never copied.
       default:
         break;
     }
   }
 
-  return { goalId, at, decision, spends, recordTxs, settle };
+  return { goalId, at, decision, spends, recordTxs, settle, selfReported };
 }

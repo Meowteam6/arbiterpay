@@ -136,7 +136,7 @@ export default function NamedPayoutFeed() {
         </p>
       ) : payouts.length === 0 ? (
         <p className="rounded-2xl border border-edge bg-surface p-5 text-sm text-muted">
-          No payouts yet. The first verified win lands here.
+          No payouts yet. The first win lands here.
         </p>
       ) : (
         <ul className="flex flex-col gap-3">

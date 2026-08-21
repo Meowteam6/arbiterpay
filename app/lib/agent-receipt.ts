@@ -40,6 +40,10 @@ export type ReceiptRow =
       reason: string;
       /** True for the vision judge's second opinion. */
       escalation: boolean;
+      /** True when the verdict rests on self-reported (photo/screenshot)
+       *  evidence — the low-trust tier. The receipt must render this
+       *  distinctly and NEVER present it as "verified". */
+      selfReported: boolean;
     }
   | { kind: "reason"; decision: "pay" | "no-pay"; note: string }
   | { kind: "record"; resultTx: string | null; registryTx: string | null }
@@ -142,6 +146,7 @@ export function projectReceipt(ledger: LedgerEntry[]): Receipt {
           confidence: entry.confidence,
           reason: entry.reason,
           escalation: entry.ref.endsWith(":vision-judge"),
+          selfReported: entry.selfReported === true,
         });
         break;
       }

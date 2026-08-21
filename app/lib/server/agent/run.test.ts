@@ -237,6 +237,52 @@ describe("runAgentForGoal", () => {
     });
   });
 
+  it("records a self-reported claim honestly: 1x multiplier, clamped confidence, bitmap 0, and a flagged ledger", async () => {
+    const { runAgentForGoal } = await loadRun();
+    const deps = makeDeps();
+    (deps.spotter as { nowSeconds: () => bigint }).nowSeconds = () => 500n;
+
+    // The attester read comes back verified at HIGH confidence, exactly as a
+    // document claim would — the difference is the TIER, not the read.
+    const result = await runAgentForGoal(deps, {
+      ...INPUT,
+      evidenceKind: "self-reported",
+    });
+
+    expect(result.status).toBe("recorded");
+    // Multiplier forced to 1x (10000 bps), never the 2x a "high" verdict earns
+    // on a verified tier.
+    expect(deps.legacyRecordResult).toHaveBeenCalledWith(
+      7n,
+      USER,
+      true,
+      10_000n,
+    );
+    // Confidence clamped to at most medium, and the on-chain bitmap is 0 — a
+    // self-reported verdict must NEVER assert FACET_AI_ATTESTED.
+    expect(deps.legacyRecordVerdict).toHaveBeenCalledWith(
+      7n,
+      USER,
+      true,
+      "medium",
+      "job-1",
+      0,
+    );
+    // The ledger verdict is flagged self-reported so every downstream reader
+    // (receipt, feed, rail) tells it apart from the verified tier.
+    const verdict = result.ledger.find((e) => e.kind === "verdict");
+    expect(verdict).toMatchObject({ selfReported: true });
+    // It is never presented as verified: no wearable/AI facet on chain.
+    expect(deps.legacyRecordVerdict).not.toHaveBeenCalledWith(
+      7n,
+      USER,
+      true,
+      expect.anything(),
+      "job-1",
+      4,
+    );
+  });
+
   it("records and settles through the Circle wallet once the roles point at SPOTTER", async () => {
     const { runAgentForGoal } = await loadRun();
     const reader = fakeReader({

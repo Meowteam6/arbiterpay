@@ -18,7 +18,7 @@
 // is scoped to one wallet rather than the whole contract, and the result is
 // cached briefly per wallet so a profile view does not re-scan on every render.
 
-import { getAddress, type Address } from "viem";
+import { getAddress, type Address, type Hex } from "viem";
 import {
   achieverPaidEvent,
   backerPaidEvent,
@@ -26,10 +26,14 @@ import {
   getArcPublicClient,
   getHealthPoolsAddress,
   goalBackedEvent,
+  healthPoolsAbi,
+  healthVerdictReadAbi,
   poolJoinedEvent,
   resultRecordedEvent,
 } from "@/lib/contract";
+import { proofTierFromVerdict, type ProofTier } from "@/lib/proof-tier";
 import { normalizeAddress } from "@/lib/social";
+import { optionalEnv } from "@/lib/server/env";
 import { scanInWindows, poolsScanFromBlock } from "@/lib/server/chunked-logs";
 
 export interface SocialWin {
@@ -38,10 +42,22 @@ export interface SocialWin {
   amountUsd: string; // formatted, two decimals, e.g. "40.00"
   txHash: string; // the settlement tx -> Arcscan link
   role: "achiever" | "backer";
+  /** Trust tier of an achiever win (from the HealthVerdict facet bitmap); null
+   *  for a backer win, which makes no tier claim of its own. A "self-reported"
+   *  win is a real win but must NEVER render as verified. "unknown" is neither
+   *  proven verified nor known self-reported. */
+  tier: ProofTier | null;
 }
 
 export interface SocialStats {
-  goalsHit: number;
+  goalsHit: number; // total achiever wins (verified + self-reported + unknown)
+  /** Achiever wins whose on-chain verdict asserts a trust facet. This is the
+   *  number the profile's "Verified wins" stat shows — self-reported wins are
+   *  excluded so it can never overstate. */
+  verifiedWins: number;
+  /** Achiever wins whose on-chain verdict asserts no facet (bitmap 0): real
+   *  wins, paid at 1x, that are NOT verified and are counted separately. */
+  selfReportedWins: number;
   usdcEarned: bigint; // USDC in 6-decimal base units
   poolsJoined: number;
   backerWins: number;
@@ -53,6 +69,8 @@ export interface SocialStats {
 
 export const EMPTY_STATS: SocialStats = {
   goalsHit: 0,
+  verifiedWins: 0,
+  selfReportedWins: 0,
   usdcEarned: 0n,
   poolsJoined: 0,
   backerWins: 0,
@@ -128,6 +146,59 @@ async function resolveBlockTimes(
         out.set(blockNumber, new Date(Number(block.timestamp) * 1000).toISOString());
       } catch {
         // Leave this block out; the win row renders without a timestamp.
+      }
+    }),
+  );
+  return out;
+}
+
+/**
+ * Resolve the on-chain trust tier of each of a wallet's achiever wins, keyed by
+ * pool id. Every AchieverPaid to this wallet has a goalId of
+ * computeGoalId(pool, poolId, wallet, periodStart); its HealthVerdict facet
+ * bitmap says whether the win is verified-tier or the low-trust self-reported
+ * tier (bitmap 0). No getLogs — this is a plain view read per distinct pool.
+ *
+ * Best-effort and fail-safe: with the registry unset, or on any read failure,
+ * the pool is left OUT of the map and the caller treats it as "unknown" (never
+ * verified). A win is only ever counted as verified when the chain proves it.
+ */
+async function achieverTierByPool(
+  poolsAddress: Address,
+  account: Address,
+  achieverPoolIds: bigint[],
+): Promise<Map<string, ProofTier>> {
+  const out = new Map<string, ProofTier>();
+  const registry = optionalEnv("HEALTH_VERDICT_ADDRESS", "");
+  if (registry === "" || !/^0x[0-9a-fA-F]{40}$/.test(registry)) return out;
+
+  const distinct = Array.from(
+    new Set(achieverPoolIds.map((id) => id.toString())),
+  ).map((s) => BigInt(s));
+  if (distinct.length === 0) return out;
+
+  const client = getArcPublicClient();
+  await Promise.all(
+    distinct.map(async (poolId) => {
+      try {
+        const goalId = (await client.readContract({
+          address: poolsAddress,
+          abi: healthPoolsAbi,
+          functionName: "computeGoalId",
+          args: [poolId, account],
+        })) as Hex;
+        const verdict = await client.readContract({
+          address: registry as Address,
+          abi: healthVerdictReadAbi,
+          functionName: "getVerdict",
+          args: [goalId],
+        });
+        out.set(
+          poolId.toString(),
+          proofTierFromVerdict(verdict.verified, Number(verdict.bitmap)),
+        );
+      } catch {
+        // Leave this pool out; the caller reads it as "unknown" (not verified).
       }
     }),
   );
@@ -217,6 +288,28 @@ export async function getSocialStats(rawAddress: string): Promise<SocialStats> {
         ),
       ]);
 
+    // Trust tier per winning pool, read from the HealthVerdict facet bitmap.
+    // A win is only counted as verified when the chain proves a trust facet;
+    // a bitmap-0 verdict is a real but self-reported win, counted separately.
+    const achieverPoolIds = achiever
+      .map((log) => log.args.poolId)
+      .filter((id): id is bigint => id !== undefined);
+    const tierByPool = await achieverTierByPool(
+      poolsAddress,
+      account,
+      achieverPoolIds,
+    );
+    const tierOfPool = (poolId: bigint | undefined): ProofTier =>
+      poolId === undefined ? "unknown" : (tierByPool.get(poolId.toString()) ?? "unknown");
+
+    let verifiedWins = 0;
+    let selfReportedWins = 0;
+    for (const log of achiever) {
+      const tier = tierOfPool(log.args.poolId);
+      if (tier === "verified") verifiedWins += 1;
+      else if (tier === "self-reported") selfReportedWins += 1;
+    }
+
     let usdcEarned = 0n;
     for (const log of achiever) usdcEarned += log.args.amount ?? 0n;
     for (const log of backerPaid) usdcEarned += log.args.amount ?? 0n;
@@ -235,6 +328,7 @@ export async function getSocialStats(rawAddress: string): Promise<SocialStats> {
       txHash: string;
       amount: bigint;
       role: "achiever" | "backer";
+      tier: ProofTier | null;
     };
     const winLogs: WinLog[] = [
       ...achiever.map((log) => ({
@@ -243,6 +337,7 @@ export async function getSocialStats(rawAddress: string): Promise<SocialStats> {
         txHash: String(log.transactionHash ?? ""),
         amount: log.args.amount ?? 0n,
         role: "achiever" as const,
+        tier: tierOfPool(log.args.poolId),
       })),
       ...backerPaid.map((log) => ({
         blockNumber: log.blockNumber,
@@ -250,6 +345,7 @@ export async function getSocialStats(rawAddress: string): Promise<SocialStats> {
         txHash: String(log.transactionHash ?? ""),
         amount: log.args.amount ?? 0n,
         role: "backer" as const,
+        tier: null,
       })),
     ]
       .filter((w) => w.txHash !== "")
@@ -267,10 +363,13 @@ export async function getSocialStats(rawAddress: string): Promise<SocialStats> {
       amountUsd: formatUsdc(w.amount),
       txHash: w.txHash,
       role: w.role,
+      tier: w.tier,
     }));
 
     const stats: SocialStats = {
       goalsHit: achiever.length,
+      verifiedWins,
+      selfReportedWins,
       usdcEarned,
       poolsJoined: joined.length,
       backerWins: backerPaid.length,

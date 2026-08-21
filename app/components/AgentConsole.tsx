@@ -47,8 +47,13 @@ function ClaimCard({ claim }: { claim: PublicFeedClaim }) {
   return (
     <li className="rounded-xl border border-edge bg-surface-raised p-4">
       <div className="flex flex-wrap items-baseline justify-between gap-2">
-        <span className="font-mono text-xs text-muted">
+        <span className="flex flex-wrap items-center gap-2 font-mono text-xs text-muted">
           {shortGoal(claim.goalId)}
+          {claim.selfReported ? (
+            <span className="rounded-full border border-warning/40 bg-warning/10 px-2 py-0.5 font-sans text-[10px] font-semibold uppercase tracking-wide text-warning">
+              self-reported
+            </span>
+          ) : null}
         </span>
         <span className="text-xs text-muted">
           {new Date(claim.at).toLocaleString()}

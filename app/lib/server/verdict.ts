@@ -64,6 +64,17 @@ export const VERDICT_FACETS = {
   document: FACET_AI_ATTESTED,
   /** Wearable streak checked against Junction provider data. No AI involved. */
   wearable: FACET_WEARABLE,
+  /**
+   * Self-reported photo/screenshot: asserts NO trust facet, so the on-chain
+   * bitmap is 0. A self-reported claim MUST NOT set FACET_AI_ATTESTED even
+   * though the TEE reads the image, because the trust claim is not "AI read
+   * it" but "we verified it is real, recent, and theirs" — which self-reported
+   * evidence cannot support. bitmap 0 is legal (0 & ~FACET_MASK == 0), needs no
+   * redeploy, and is the honest on-chain representation of the low-trust tier.
+   * The distinguishable tier itself is carried off-chain by the ledger verdict
+   * entry's `selfReported` flag, where the receipt and feed read it.
+   */
+  "self-reported": 0,
 } as const;
 
 const CONFIDENCE_U8: Record<Confidence, number> = { low: 0, medium: 1, high: 2 };

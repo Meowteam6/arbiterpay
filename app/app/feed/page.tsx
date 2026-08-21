@@ -12,7 +12,7 @@ export default function FeedPage() {
       <div className="space-y-2">
         <h1 className="text-2xl font-bold tracking-tight">Who got paid</h1>
         <p className="text-sm text-muted">
-          Every verified win SPOTTER has settled on Arc, named by handle where
+          Every win SPOTTER has settled on Arc, named by handle where
           the wallet has claimed one. The amount and the settlement tx are
           public; the health category behind each goal never is.
         </p>

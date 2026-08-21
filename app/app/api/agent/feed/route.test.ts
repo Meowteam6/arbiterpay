@@ -101,6 +101,7 @@ describe("GET /api/agent/feed", () => {
         txHash: "0xsettle",
         periodEndIso: null,
       },
+      selfReported: false,
     });
   });
 

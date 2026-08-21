@@ -32,7 +32,7 @@ export async function generateMetadata({
   if (!check.ok) return { title: "GoHealthMe" };
   return {
     title: `@${check.handle} on GoHealthMe`,
-    description: "Verified health-goal wins and USDC payouts. No health category is ever shown.",
+    description: "Health-goal wins and USDC payouts. No health category is ever shown.",
   };
 }
 
@@ -87,13 +87,17 @@ export default async function ProfilePage({
     amountUsd: win.amountUsd,
     txHash: win.txHash,
     role: win.role,
+    tier: win.tier,
   }));
 
   const data: ProfileData = {
     handle: profile.handle,
     emoji: avatarGlyph(profile.handle, profile.emoji),
     address: profile.address,
-    verifiedWins: stats.goalsHit,
+    // Verified-tier wins ONLY. Self-reported wins are counted separately and
+    // never inflate this figure.
+    verifiedWins: stats.verifiedWins,
+    selfReportedWins: stats.selfReportedWins,
     usdcEarned: formatUsdc(stats.usdcEarned),
     winStreak: stats.winStreak,
     backers: toPeers(stats.backerAddresses),

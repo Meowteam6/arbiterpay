@@ -30,12 +30,15 @@ import { Badge, EmptyState, ErrorNote, Skeleton, TAP_TARGET } from "@/components
 import {
   displayGoalSpec,
   evidenceTypeOf,
+  fetchGoalId,
   fetchParticipant,
   fetchPools,
+  fetchProofTier,
   formatUsdc,
   type ParticipantInfo,
   type PoolInfo,
 } from "@/lib/contract";
+import { dashboardDeferredLead, type ProofTier } from "@/lib/proof-tier";
 import {
   fetchProviderState,
   providerAuthReason,
@@ -105,6 +108,33 @@ function formatSettleMoment(periodEnd: bigint): string {
     hour: "numeric",
     minute: "2-digit",
   });
+}
+
+/** The deferred-claim note. A recorded-but-unsettled claim is owed money and is
+ *  waiting on the clock - but a self-reported claim must NEVER read "Verified"
+ *  here. The tier comes from the on-chain HealthVerdict facet (fetchProofTier);
+ *  when it is unknown (registry unset or a read miss) the copy stays neutral and
+ *  never claims verification. */
+function DeferredNote({
+  tier,
+  settlesAt,
+}: {
+  tier: ProofTier | null;
+  settlesAt: bigint;
+}) {
+  const { lead, tone, selfReported } = dashboardDeferredLead(tier);
+  const cls =
+    tone === "warning"
+      ? "border-warning/40 bg-warning/10 text-warning"
+      : "border-accent/30 bg-accent-deep/20 text-accent";
+  return (
+    <p className={`mt-3 rounded-xl border border-dashed p-3 text-sm ${cls}`}>
+      {lead} SPOTTER settles this {selfReported ? "self-reported claim " : ""}
+      when the pool period ends at {formatSettleMoment(settlesAt)} (
+      <Countdown periodStart={0n} periodEnd={settlesAt} />) - no human involved,
+      nothing for you to do.
+    </p>
+  );
 }
 
 function ConnectButton({
@@ -401,6 +431,35 @@ export default function DashboardContent() {
     retry: false,
   });
 
+  // Trust tier per deferred (recorded-but-unsettled) claim, read from the
+  // on-chain HealthVerdict facet so a self-reported claim can never render as
+  // "Verified" on its settling card. Only the deferred subset is read.
+  const deferredEntries = (joinedQuery.data ?? []).filter(
+    (entry) => deferredUntil(entry) !== null,
+  );
+  const deferredKey = deferredEntries
+    .map((entry) => entry.pool.id.toString())
+    .join(",");
+  const deferredTierQuery = useQuery({
+    queryKey: ["deferred-proof-tier", address, deferredKey],
+    enabled: address !== null && deferredEntries.length > 0,
+    queryFn: async (): Promise<Map<string, ProofTier>> => {
+      const map = new Map<string, ProofTier>();
+      await Promise.all(
+        deferredEntries.map(async (entry) => {
+          try {
+            if (address === null) return;
+            const goalId = await fetchGoalId(entry.pool.id, address);
+            map.set(entry.pool.id.toString(), await fetchProofTier(goalId));
+          } catch {
+            map.set(entry.pool.id.toString(), "unknown");
+          }
+        }),
+      );
+      return map;
+    },
+  });
+
   if (!ready) {
     return (
       <div className="space-y-4">
@@ -505,12 +564,10 @@ export default function DashboardContent() {
                   />
                 </div>
                 {settlesAt !== null ? (
-                  <p className="mt-3 rounded-xl border border-dashed border-accent/30 bg-accent-deep/20 p-3 text-sm text-accent">
-                    Verified and recorded on-chain. SPOTTER settles this when
-                    the pool period ends at {formatSettleMoment(settlesAt)} (
-                    <Countdown periodStart={0n} periodEnd={settlesAt} />
-                    ) - no human involved, nothing for you to do.
-                  </p>
+                  <DeferredNote
+                    tier={deferredTierQuery.data?.get(pool.id.toString()) ?? null}
+                    settlesAt={settlesAt}
+                  />
                 ) : null}
               </Link>
             );

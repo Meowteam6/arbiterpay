@@ -47,6 +47,7 @@ import {
   toBytes,
   type Hex,
 } from "viem";
+import type { Modality } from "@/lib/contract";
 import { optionalEnv } from "@/lib/server/env";
 import {
   isRetryableStatus,
@@ -851,4 +852,33 @@ export function multiplierForConfidence(confidence: Confidence): bigint {
       break;
   }
   return bps > CAP ? CAP : bps;
+}
+
+/**
+ * Clamp a confidence to at most "medium" for the self-reported tier. Trust
+ * tier and confidence are different axes: a self-reported gym photo can be
+ * legibly MEDIUM (the image plausibly shows the goal) while the tier stays
+ * low-trust (we cannot prove it is real, recent, or theirs). Clamping keeps a
+ * self-reported claim off the "high" confidence rung — and therefore off the
+ * 2x payout — without dropping it to "low", which would fail the canSettle
+ * gate and pay a legible photo nothing.
+ */
+export function clampConfidenceForSelfReported(
+  confidence: Confidence,
+): Confidence {
+  return confidence === "high" ? "medium" : confidence;
+}
+
+/**
+ * The on-chain payout multiplier for a verdict, tier-aware. The verified tiers
+ * (wearable, document) earn the confidence-scaled multiplier; the self-reported
+ * tier is forced to 1x (10000 bps), never the confidence bonus, because we
+ * cannot stand behind unverifiable evidence enough to pay a premium on it.
+ */
+export function multiplierForVerdict(
+  confidence: Confidence,
+  evidenceKind: Modality,
+): bigint {
+  if (evidenceKind === "self-reported") return 10_000n;
+  return multiplierForConfidence(confidence);
 }

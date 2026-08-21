@@ -20,7 +20,7 @@
 import type { LedgerEntry } from "@/lib/agent-receipt";
 import { authBlockReason, type ClientAuth } from "@/lib/client-auth";
 
-export type ProofPath = "wearable" | "document";
+export type ProofPath = "wearable" | "document" | "self-reported";
 
 /** Mirror of wearable.ts's JUNCTION_READ_SERVICE. */
 const WEARABLE_SERVICES = new Set(["junction-read"]);
@@ -44,6 +44,17 @@ function pathOfService(service: string): ProofPath | null {
  * ever tried.
  */
 export function claimProofPathOf(ledger: LedgerEntry[]): ProofPath | null {
+  // The tier is definitive: a self-reported verdict routes to the self-reported
+  // surface regardless of which paid service produced it (self-reported shares
+  // the attester read with document). Newest verdict wins, so a claim retried
+  // across tiers resolves to the tier that ran last.
+  for (let i = ledger.length - 1; i >= 0; i -= 1) {
+    const entry = ledger[i];
+    if (entry.kind === "verdict") {
+      if (entry.selfReported === true) return "self-reported";
+      break;
+    }
+  }
   for (let i = ledger.length - 1; i >= 0; i -= 1) {
     const entry = ledger[i];
     if (entry.kind === "spend") {

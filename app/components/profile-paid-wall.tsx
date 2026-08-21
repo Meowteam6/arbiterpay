@@ -1,14 +1,19 @@
-// Public "paid wall" for a claimed handle. Renders proof of verified wins and
-// USDC payouts WITHOUT ever revealing the health category behind any goal.
+// Public "paid wall" for a claimed handle. Renders a wallet's wins and USDC
+// payouts WITHOUT ever revealing the health category behind any goal.
 //
 // THE REDACTION RULE IS STRUCTURAL HERE: ProfileData has no field that can
 // carry an initiative, a goalSpec, or any health label - only a handle, an
 // avatar glyph, an address, counts, USDC amounts, backer handles, and
-// settlement tx hashes. A win row shows a role ("Verified win" / "Backed a
-// winner"), never what the goal was. There is deliberately nowhere to put a
-// health string, so one cannot render next to the handle.
+// settlement tx hashes. A win row shows a role and its trust tier ("Verified
+// win" / "Self-reported win" / "Backed a winner"), never what the goal was.
+//
+// THE HONESTY RULE: a self-reported win (a photo/screenshot we cannot confirm
+// is real, recent, or theirs) is a real win paid at 1x, but it must NEVER carry
+// a check/shield or read "Verified". The trust tier comes from the on-chain
+// HealthVerdict facet bitmap, resolved upstream in lib/server/social-stats.
 
 import { arcTxUrl } from "@/lib/chains";
+import { profileWinPresentation, type ProofTier } from "@/lib/proof-tier";
 
 export interface Win {
   id: string;
@@ -16,6 +21,9 @@ export interface Win {
   amountUsd: string; // "40.00" - two decimals, exactly as the ledger recorded it
   txHash: string; // settlement tx hash -> Arcscan link
   role: "achiever" | "backer";
+  /** Trust tier of an achiever win; null for a backer win. A "self-reported"
+   *  win never renders as verified. */
+  tier: ProofTier | null;
 }
 
 export interface Peer {
@@ -27,7 +35,8 @@ export interface ProfileData {
   handle: string;
   emoji: string; // avatar glyph (render as-is, it is user data)
   address: string;
-  verifiedWins: number;
+  verifiedWins: number; // verified-tier only; excludes self-reported
+  selfReportedWins: number; // real wins, counted separately, never "verified"
   usdcEarned: string; // "1240.00"
   winStreak: number;
   backers: Peer[];
@@ -89,6 +98,25 @@ function FlameIcon({ className }: { className?: string }) {
       aria-hidden="true"
     >
       <path d="M12 3c.5 3-1.5 4.5-3 6.5C7.4 11.7 7 13.3 7 15a5 5 0 0010 0c0-2-1-3.8-2.5-5 .3 1.4-.4 2.4-1.3 2.8.6-2.6-.6-5-1.2-6.3-.3-.7-.7-1.6 0-3.5z" />
+    </svg>
+  );
+}
+
+function AlertIcon({ className }: { className?: string }) {
+  return (
+    <svg
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      strokeWidth="1.75"
+      strokeLinecap="round"
+      strokeLinejoin="round"
+      className={className}
+      aria-hidden="true"
+    >
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 8v5" />
+      <path d="M12 16h.01" />
     </svg>
   );
 }
@@ -213,19 +241,45 @@ function PeerColumn({
 
 /* ---------- win row ---------- */
 
+// Icon container tones per trust tier. Self-reported and unknown wins carry NO
+// check badge — a self-reported photo cannot be presented as verified.
+const WIN_ICON_TONE: Record<"accent" | "warning" | "muted", string> = {
+  accent: "bg-accent-deep text-accent",
+  warning: "bg-warning/10 text-warning",
+  muted: "bg-surface-raised text-muted",
+};
+
 function WinRow({ win, index }: { win: Win; index: number }) {
-  const label = win.role === "achiever" ? "Verified win" : "Backed a winner";
+  const { label, tone, showCheck, sublabel } = profileWinPresentation(
+    win.role,
+    win.tier,
+  );
   return (
     <li
       className="ghm-rise-in flex items-center gap-3 rounded-2xl border border-edge bg-surface p-4"
       style={{ animationDelay: `${Math.min(index, 8) * 60}ms` }}
     >
-      <span className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-accent-deep text-accent">
-        <CheckBadgeIcon className="h-5 w-5" />
+      <span
+        className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full ${WIN_ICON_TONE[tone]}`}
+      >
+        {showCheck ? (
+          <CheckBadgeIcon className="h-5 w-5" />
+        ) : tone === "warning" ? (
+          <AlertIcon className="h-5 w-5" />
+        ) : (
+          <span aria-hidden="true" className="h-2 w-2 rounded-full bg-current" />
+        )}
       </span>
 
       <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-        <span className="text-sm font-medium text-foreground">{label}</span>
+        <span className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-medium text-foreground">{label}</span>
+          {sublabel !== null ? (
+            <span className="text-xs uppercase tracking-wide text-warning">
+              {sublabel}
+            </span>
+          ) : null}
+        </span>
         <span className="flex items-center gap-2 text-xs text-muted">
           <span>{relativeTime(win.at)}</span>
           <span aria-hidden="true">&middot;</span>
@@ -307,6 +361,18 @@ export function ProfilePaidWall({ profile }: { profile: ProfileData }) {
               </span>
             </div>
           </div>
+          {/* Self-reported wins are counted separately and never folded into
+              the "Verified wins" figure above. */}
+          {profile.selfReportedWins > 0 ? (
+            <p className="mt-3 flex items-center gap-1.5 text-xs text-warning">
+              <AlertIcon className="h-3.5 w-3.5 shrink-0" />
+              <span>
+                + {profile.selfReportedWins} self-reported{" "}
+                {profile.selfReportedWins === 1 ? "win" : "wins"} &mdash; not
+                verified
+              </span>
+            </p>
+          ) : null}
           <PrivacyLine className="mt-4" />
         </section>
 
@@ -324,17 +390,18 @@ export function ProfilePaidWall({ profile }: { profile: ProfileData }) {
           />
         </section>
 
-        {/* 4. Verified wins feed */}
+        {/* 4. Wins feed - each row carries its own trust tier, so a
+            self-reported win reads as self-reported, never verified. */}
         <section className="flex flex-col gap-3">
           <div className="flex flex-col gap-2">
             <h2 className="text-sm font-medium uppercase tracking-wider text-muted">
-              Verified wins
+              Wins
             </h2>
             <PrivacyLine />
           </div>
           {profile.wins.length === 0 ? (
             <p className="rounded-2xl border border-edge bg-surface p-5 text-sm text-muted">
-              No verified wins yet
+              No wins yet
             </p>
           ) : (
             <ul className="flex flex-col gap-3">

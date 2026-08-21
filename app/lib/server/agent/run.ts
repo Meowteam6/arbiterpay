@@ -92,8 +92,9 @@ import {
   type SpotterDeps,
 } from "@/lib/server/agent/spotter";
 import {
+  clampConfidenceForSelfReported,
   isFailId,
-  multiplierForConfidence,
+  multiplierForVerdict,
   type Confidence,
   type PollResult,
   type Verdict,
@@ -922,6 +923,7 @@ async function runClaimUnlocked(
     (priorPrimary.verified !== verdict.verified ||
       priorPrimary.confidence !== verdict.confidence ||
       priorPrimary.reason !== verdict.reason);
+  const isSelfReported = input.evidenceKind === "self-reported";
   if (priorPrimary === undefined || verdictChanged) {
     ledger = await appendLedger(input.goalId, {
       kind: "verdict",
@@ -929,6 +931,7 @@ async function runClaimUnlocked(
       confidence: verdict.confidence,
       reason: verdict.reason,
       ref: input.attesterId,
+      selfReported: isSelfReported,
     });
   }
 
@@ -998,6 +1001,7 @@ async function runClaimUnlocked(
           confidence: opinion.verdict.confidence,
           reason: opinion.verdict.reason,
           ref: escalationRef(input.attesterId),
+          selfReported: isSelfReported,
         });
       }
     } else {
@@ -1066,8 +1070,17 @@ async function runClaimUnlocked(
   // ledger entry lands only after BOTH writes are in.
   if (entryOf(ledger, "record") === undefined) {
     // An escalated claim records the second opinion's confidence: that is the
-    // verdict the pay decision actually rests on.
-    const multiplierBps = multiplierForConfidence(effective.confidence);
+    // verdict the pay decision actually rests on. The self-reported tier is
+    // recorded honestly: multiplier forced to 1x, confidence clamped to at most
+    // medium (never the 2x/high premium on unverifiable evidence), and a bitmap
+    // of 0 (VERDICT_FACETS["self-reported"]) that asserts no verified facet.
+    const multiplierBps = multiplierForVerdict(
+      effective.confidence,
+      input.evidenceKind,
+    );
+    const recordedConfidence = isSelfReported
+      ? clampConfidenceForSelfReported(effective.confidence)
+      : effective.confidence;
     const facets = VERDICT_FACETS[input.evidenceKind];
     try {
       let resultTx: string | undefined;
@@ -1101,7 +1114,7 @@ async function runClaimUnlocked(
         const r = await recordVerdictAsSpotter(deps.spotter, {
           goalId: input.goalId,
           verified: true,
-          confidence: effective.confidence,
+          confidence: recordedConfidence,
           attesterRef: input.attesterId,
           facets,
         });
@@ -1112,7 +1125,7 @@ async function runClaimUnlocked(
           input.poolId,
           input.address,
           true,
-          effective.confidence,
+          recordedConfidence,
           input.attesterId,
           facets,
         );

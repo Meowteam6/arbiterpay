@@ -64,7 +64,12 @@
 // visibility, never money.
 
 import { getAddress, isAddress, type Address, type Hex } from "viem";
-import { evidenceTypeOf } from "@/lib/contract";
+import {
+  claimModalityFor,
+  MODALITIES,
+  proofPolicyOf,
+  type Modality,
+} from "@/lib/contract";
 import { runAgentForGoal, type RunDeps } from "@/lib/server/agent/run";
 import { readLedger, type LedgerEntry } from "@/lib/server/agent/ledger";
 import {
@@ -100,8 +105,6 @@ import { authenticateWallet } from "@/lib/server/wallet-auth";
 export const maxDuration = 60;
 
 const GOAL_ID_RE = /^0x[0-9a-fA-F]{64}$/;
-const EVIDENCE_KINDS = ["document", "wearable"] as const;
-type EvidenceKind = (typeof EVIDENCE_KINDS)[number];
 
 function liveDeps(
   reader: ArcReader,
@@ -218,28 +221,36 @@ export async function POST(request: Request, ctx: Ctx) {
       return jsonError(400, "That pool does not exist.");
     }
     const goalSpec = pool.goalSpec;
-    const evidenceKind: EvidenceKind = evidenceTypeOf(goalSpec);
+    const policy = proofPolicyOf(goalSpec);
 
-    if (body.evidenceKind !== undefined) {
-      if (
-        typeof body.evidenceKind !== "string" ||
-        !EVIDENCE_KINDS.includes(body.evidenceKind as EvidenceKind)
-      ) {
-        return jsonError(
-          400,
-          `evidenceKind must be one of: ${EVIDENCE_KINDS.join(", ")}`,
-        );
-      }
-      if (body.evidenceKind !== evidenceKind) {
-        return jsonError(
-          400,
-          `this pool is verified by ${evidenceKind} evidence`,
-        );
-      }
+    // The modality this claim runs under, enforcing the pool's accepted set. A
+    // caller may request one of the accepted modalities (the hybrid opt-in
+    // surfaces do); absent a request the pool's floor is used. A modality the
+    // pool does NOT accept is refused here, server-side, before any spend —
+    // never merely hidden in the UI.
+    const requested =
+      body.evidenceKind === undefined ? undefined : String(body.evidenceKind);
+    const resolved = claimModalityFor(policy, requested);
+    if (!resolved.ok) {
+      return resolved.reason === "invalid"
+        ? jsonError(400, `evidenceKind must be one of: ${MODALITIES.join(", ")}`)
+        : jsonError(
+            400,
+            `this pool accepts ${policy.accepted.join(", ")} evidence, not ${requested}`,
+          );
     }
+    const evidenceKind: Modality = resolved.modality;
 
-    if (evidenceKind === "document") {
-      if (typeof body.attesterId !== "string" || body.attesterId.trim() === "") {
+    // Document and self-reported are both upload-routed: a file goes to the TEE
+    // attester and the claim carries that job id. Wearable reads the pool-period
+    // Junction summary instead and takes no attester job.
+    const uploadRouted =
+      evidenceKind === "document" || evidenceKind === "self-reported";
+    if (uploadRouted) {
+      if (
+        typeof body.attesterId !== "string" ||
+        body.attesterId.trim() === ""
+      ) {
         return jsonError(400, "attesterId must be a non-empty string");
       }
     } else if (body.attesterId !== undefined) {

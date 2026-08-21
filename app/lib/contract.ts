@@ -11,6 +11,9 @@ import {
 } from "viem";
 import { arcTestnet } from "@/lib/chains";
 import { poolsScanFromBlock } from "@/lib/server/chunked-logs";
+import { proofTierFromVerdict, type ProofTier } from "@/lib/proof-tier";
+
+export { proofTierFromVerdict, type ProofTier };
 
 // ---------------------------------------------------------------- addresses
 
@@ -27,6 +30,21 @@ export const USDC_DECIMALS = 6;
  */
 export function getHealthPoolsAddress(): Address | null {
   const raw = process.env.NEXT_PUBLIC_HEALTH_POOLS_ADDRESS;
+  if (raw === undefined || raw === "") return null;
+  if (!/^0x[0-9a-fA-F]{40}$/.test(raw)) return null;
+  return raw as Address;
+}
+
+/**
+ * HealthVerdict registry address for READ-ONLY tier lookups from the browser.
+ * The registry's `verified` bool and facet `bitmap` are public routing data
+ * (never health data), so a client may read them to tell a verified win from a
+ * low-trust self-reported one. Null when unset — callers then treat the tier as
+ * "unknown" and MUST NOT present the claim as verified. The value is the public
+ * on-chain address, mirroring NEXT_PUBLIC_HEALTH_POOLS_ADDRESS.
+ */
+export function getHealthVerdictAddress(): Address | null {
+  const raw = process.env.NEXT_PUBLIC_HEALTH_VERDICT_ADDRESS;
   if (raw === undefined || raw === "") return null;
   if (!/^0x[0-9a-fA-F]{40}$/.test(raw)) return null;
   return raw as Address;
@@ -586,6 +604,54 @@ export async function fetchGoalId(id: bigint, user: Address): Promise<Hex> {
   });
 }
 
+// Minimal read view of the HealthVerdict registry: getVerdict returns the
+// recorded verdict struct, of which only the public `verified` bool and facet
+// `bitmap` are read here to derive the display trust tier. No health-derived
+// content is stored on chain or read here.
+export const healthVerdictReadAbi = [
+  {
+    type: "function",
+    name: "getVerdict",
+    stateMutability: "view",
+    inputs: [{ name: "goalId", type: "bytes32" }],
+    outputs: [
+      {
+        name: "",
+        type: "tuple",
+        components: [
+          { name: "verified", type: "bool" },
+          { name: "confidence", type: "uint8" },
+          { name: "digest", type: "bytes32" },
+          { name: "attester", type: "address" },
+          { name: "timestamp", type: "uint64" },
+          { name: "bitmap", type: "uint16" },
+        ],
+      },
+    ],
+  },
+] as const;
+
+/**
+ * The on-chain trust tier of a goal's recorded verdict, read from the
+ * HealthVerdict facet bitmap. A passing verdict with no facet (bitmap 0) is the
+ * low-trust self-reported tier; a facet set marks the verified tier. Returns
+ * "unknown" when the registry address is unset or no passing verdict exists —
+ * which callers MUST NOT present as verified. Reads only the public verified
+ * bool + facet bitmap, never any health data.
+ */
+export async function fetchProofTier(goalId: Hex): Promise<ProofTier> {
+  const address = getHealthVerdictAddress();
+  if (address === null) return "unknown";
+  const client = getArcPublicClient();
+  const verdict = await client.readContract({
+    address,
+    abi: healthVerdictReadAbi,
+    functionName: "getVerdict",
+    args: [goalId],
+  });
+  return proofTierFromVerdict(verdict.verified, Number(verdict.bitmap));
+}
+
 // ------------------------------------------------------------------ helpers
 
 export function formatUsdc(amount: bigint): string {
@@ -609,31 +675,152 @@ export const BOUNTY_MODEL_LABELS: Record<number, string> = {
   1: "Pro-rata pot split",
 };
 
-// ------------------------------------------------------------ evidence type
+// -------------------------------------------------------- proof-modality policy
 
 /**
- * Evidence convention. The contract goalSpec is a free-form string, so we
- * encode how a goal is verified by an optional leading marker:
+ * Proof-modality taxonomy. A goal is proven by one of three modalities, trust-
+ * ranked highest to lowest:
  *
- *   "[doc] ..."  -> verified by an uploaded document (flu shot, lab PDF, etc.)
- *   anything else -> verified by wearable data (the original behavior)
+ *   "wearable"      -> connected-device metrics (sleep, steps) read from the
+ *                      Junction provider. Deterministic; the highest-trust tier.
+ *   "document"      -> an uploaded record (flu shot, lab PDF) judged in the
+ *                      confidential TEE attester. Verified tier.
+ *   "self-reported" -> a photo, screenshot, or video the participant uploads.
+ *                      LOW TRUST and still in development: we cannot confirm the
+ *                      image is real, recent, or theirs. It is NEVER "verified".
  *
- * The marker is for routing and badges only; no contract call changes. Older
- * pools created before this convention have no marker and render as wearable,
- * which keeps the feature fully backward compatible.
+ * The policy for a pool lives ON-CHAIN in its goalSpec as an optional leading
+ * marker; no contract change. Two marker conventions coexist:
+ *
+ *   (legacy) "[doc] ..."          -> floor document, accepts [document]
+ *   "[proof=<tokens>] ..."        -> tokens are '+'-joined from
+ *                                    wearable | doc | self, e.g.
+ *                                    "[proof=doc+self]" or "[proof=wearable+self]"
+ *   (none)                        -> floor wearable, accepts [wearable]
+ *
+ * The serializer only ever emits "[proof=...]" when self-reported is involved,
+ * so a pure-wearable pool stays unmarked and a pure-document pool stays "[doc]"
+ * exactly as before this taxonomy existed. Every pool created before it has no
+ * "[proof=...]" marker and resolves to the identical policy it always had, so
+ * the feature is fully backward compatible.
  */
 export const DOC_GOAL_MARKER = "[doc]";
 
+export type Modality = "wearable" | "document" | "self-reported";
+
+/** The three modalities, for input validation. */
+export const MODALITIES: readonly Modality[] = [
+  "wearable",
+  "document",
+  "self-reported",
+];
+
+/** Kept for backward compatibility with existing callers/tests. The floor of a
+ *  policy maps onto this two-value routing kind: self-reported is upload-routed
+ *  like a document, so it collapses to "document" here. */
 export type EvidenceType = "document" | "wearable";
 
-/** Decide how a goal is verified from its goalSpec string. */
-export function evidenceTypeOf(goalSpec: string): EvidenceType {
-  return goalSpec.trimStart().toLowerCase().startsWith(DOC_GOAL_MARKER)
-    ? "document"
-    : "wearable";
+/** A pool's proof policy: the lowest-trust modality it will accept as a floor,
+ *  and the full accepted set. `accepted` always leads with `floor`. */
+export interface ProofPolicy {
+  floor: Modality;
+  accepted: Modality[];
 }
 
-/** Prefix a goalSpec with the document marker, avoiding duplicate markers. */
+const PROOF_MARKER_RE = /^\s*\[proof=([a-z+]+)\]/i;
+
+const TOKEN_TO_MODALITY: Record<string, Modality> = {
+  wearable: "wearable",
+  doc: "document",
+  document: "document",
+  self: "self-reported",
+};
+
+function dedupeModalities(items: Modality[]): Modality[] {
+  return [...new Set(items)];
+}
+
+/**
+ * The proof policy encoded in a goalSpec. The single source of truth for how a
+ * pool may be proven. Falls back to the legacy conventions (a "[doc]" prefix,
+ * or nothing) so an unmarked or "[doc]" pool behaves exactly as it always has.
+ */
+export function proofPolicyOf(goalSpec: string): ProofPolicy {
+  const trimmed = goalSpec.trimStart();
+  const marker = PROOF_MARKER_RE.exec(trimmed);
+  if (marker !== null) {
+    const mapped: Modality[] = [];
+    for (const token of marker[1].toLowerCase().split("+")) {
+      const modality = TOKEN_TO_MODALITY[token.trim()];
+      if (modality !== undefined && !mapped.includes(modality)) {
+        mapped.push(modality);
+      }
+    }
+    if (mapped.length > 0) {
+      // Floor is the highest-trust (first non-self) modality; a marker of only
+      // "self" leaves self-reported as the floor. `accepted` leads with floor.
+      const floor = mapped.find((m) => m !== "self-reported") ?? "self-reported";
+      const accepted = dedupeModalities([
+        floor,
+        ...mapped.filter((m) => m !== floor),
+      ]);
+      return { floor, accepted };
+    }
+    // A "[proof=...]" whose tokens are all unknown is not a valid policy; fall
+    // through to the legacy interpretation rather than inventing an empty set.
+  }
+  if (trimmed.toLowerCase().startsWith(DOC_GOAL_MARKER)) {
+    return { floor: "document", accepted: ["document"] };
+  }
+  return { floor: "wearable", accepted: ["wearable"] };
+}
+
+/** Strip any leading proof marker ("[proof=...]" or the legacy "[doc]") for a
+ *  human-readable goal. Plain goals pass through unchanged. */
+function stripProofMarker(goalSpec: string): string {
+  const trimmed = goalSpec.trim();
+  const marker = PROOF_MARKER_RE.exec(trimmed);
+  if (marker !== null) return trimmed.slice(marker[0].length).trim();
+  if (trimmed.toLowerCase().startsWith(DOC_GOAL_MARKER)) {
+    return trimmed.slice(DOC_GOAL_MARKER.length).trim();
+  }
+  return trimmed;
+}
+
+/**
+ * Decide how a goal is verified from its goalSpec string. UNCHANGED contract:
+ * returns "document" or "wearable" only. A self-reported floor is upload-routed,
+ * so it maps to "document" here (the upload surface), which is what keeps every
+ * existing evidenceTypeOf caller working without knowing about the new tier.
+ */
+export function evidenceTypeOf(goalSpec: string): EvidenceType {
+  return proofPolicyOf(goalSpec).floor === "wearable" ? "wearable" : "document";
+}
+
+/**
+ * Serialize a proof policy back into a goalSpec marker. Emits a "[proof=...]"
+ * marker ONLY when self-reported is in the accepted set; a pure-document policy
+ * serializes to "[doc]" and a pure-wearable policy to no marker at all, so
+ * existing create paths produce byte-identical goalSpecs. Supersedes
+ * withDocMarker for callers that need the self-reported tier.
+ */
+export function withProofPolicy(goalSpec: string, policy: ProofPolicy): string {
+  const clean = stripProofMarker(goalSpec);
+  if (!policy.accepted.includes("self-reported")) {
+    return policy.floor === "document" ? `${DOC_GOAL_MARKER} ${clean}` : clean;
+  }
+  const marker =
+    policy.floor === "self-reported"
+      ? "[proof=self]"
+      : policy.floor === "document"
+        ? "[proof=doc+self]"
+        : "[proof=wearable+self]";
+  return `${marker} ${clean}`;
+}
+
+/** Prefix a goalSpec with the legacy document marker, avoiding duplicate
+ *  markers. Retained for callers not touching the self-reported tier; produces
+ *  the identical "[doc] ..." string it always did. */
 export function withDocMarker(goalSpec: string): string {
   const trimmed = goalSpec.trim();
   return evidenceTypeOf(trimmed) === "document"
@@ -641,9 +828,32 @@ export function withDocMarker(goalSpec: string): string {
     : `${DOC_GOAL_MARKER} ${trimmed}`;
 }
 
-/** Strip the document marker for human-readable display. */
+/** Strip the proof marker for human-readable display. */
 export function displayGoalSpec(goalSpec: string): string {
-  const trimmed = goalSpec.trim();
-  if (evidenceTypeOf(trimmed) !== "document") return trimmed;
-  return trimmed.slice(trimmed.toLowerCase().indexOf(DOC_GOAL_MARKER) + DOC_GOAL_MARKER.length).trim();
+  return stripProofMarker(goalSpec);
+}
+
+/**
+ * Resolve which modality a claim runs under, enforcing the pool's accepted set.
+ * The caller may request a specific modality (the hybrid opt-in surfaces do);
+ * absent a request, the pool's floor is used. A request outside the accepted
+ * set is refused here, server-side, so a modality the pool does not accept can
+ * never reach the run loop. Pure function so the enforcement is unit-testable
+ * without the route harness.
+ */
+export function claimModalityFor(
+  policy: ProofPolicy,
+  requested: string | undefined,
+):
+  | { ok: true; modality: Modality }
+  | { ok: false; reason: "invalid" | "not-accepted" } {
+  if (requested === undefined) return { ok: true, modality: policy.floor };
+  if (!MODALITIES.includes(requested as Modality)) {
+    return { ok: false, reason: "invalid" };
+  }
+  const modality = requested as Modality;
+  if (!policy.accepted.includes(modality)) {
+    return { ok: false, reason: "not-accepted" };
+  }
+  return { ok: true, modality };
 }

@@ -86,6 +86,12 @@ export type LedgerEntry = Stamped &
          *  retried claim gets a fresh attesterId, so ref is what keeps a
          *  fresh retry from short-circuiting on a stale verdict. */
         ref: string;
+        /** True when this verdict rests on self-reported evidence (a
+         *  photo/screenshot), the low-trust tier. Optional and backward-
+         *  compatible: absent means the verified tier (wearable/document),
+         *  exactly as every ledger written before this field. A self-reported
+         *  verdict is NEVER the verified tier and its on-chain bitmap is 0. */
+        selfReported?: boolean;
       }
     | {
         kind: "reason";

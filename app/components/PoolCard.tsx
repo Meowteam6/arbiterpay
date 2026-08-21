@@ -1,11 +1,11 @@
 import Link from "next/link";
 import Countdown from "@/components/Countdown";
-import { Badge } from "@/components/ui";
+import { Badge, ProofTierBadges } from "@/components/ui";
 import {
   BOUNTY_MODEL_LABELS,
   displayGoalSpec,
-  evidenceTypeOf,
   formatUsdc,
+  proofPolicyOf,
   shortAddress,
   type PoolInfo,
 } from "@/lib/contract";
@@ -20,7 +20,8 @@ export default function PoolCard({
   pool: PoolInfo;
   phase: PoolPhase;
 }) {
-  const isDocGoal = evidenceTypeOf(pool.goalSpec) === "document";
+  const policy = proofPolicyOf(pool.goalSpec);
+  const isPreventiveCare = policy.floor === "document";
   return (
     <Link
       href={`/pools/${pool.id.toString()}`}
@@ -29,9 +30,7 @@ export default function PoolCard({
       <div className="flex flex-wrap items-center justify-between gap-2">
         <div className="flex flex-wrap items-center gap-2">
           <Badge>{pool.initiative}</Badge>
-          <Badge tone={isDocGoal ? "accent" : "muted"}>
-            {isDocGoal ? "Document" : "Wearable"}
-          </Badge>
+          <ProofTierBadges policy={policy} />
         </div>
         {phase === "settled" ? (
           <Badge tone="muted">Settled</Badge>
@@ -39,7 +38,7 @@ export default function PoolCard({
           <Badge tone="warning">Expired</Badge>
         ) : null}
       </div>
-      {isDocGoal ? (
+      {isPreventiveCare ? (
         <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-accent">
           Preventive care - Earn from {formatUsdc(pool.balance)} USDC
         </p>

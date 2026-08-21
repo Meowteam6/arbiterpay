@@ -22,7 +22,7 @@
 import { useState } from "react";
 import Link from "next/link";
 import { DYNAMIC_CONFIGURED } from "@/lib/config";
-import { parseUsdc, withDocMarker } from "@/lib/contract";
+import { parseUsdc, withDocMarker, withProofPolicy } from "@/lib/contract";
 import { useEmbeddedWallet } from "@/lib/wallet";
 import { useDisplayNames } from "@/lib/use-display-names";
 import { useUsdcDeposit } from "@/lib/useUsdcDeposit";
@@ -126,6 +126,10 @@ function CreateChallengeInner() {
   const [reward, setReward] = useState("");
   const [message, setMessage] = useState("");
   const [target, setTarget] = useState("");
+  // Off by default: a challenge stays a document-floor pool (byte-identical to
+  // today) unless the challenger explicitly opts into accepting a self-reported
+  // photo, which loosens the floor to also allow the low-trust tier.
+  const [acceptSelf, setAcceptSelf] = useState(false);
   const [durationDays, setDurationDays] = useState(30);
   const [formError, setFormError] = useState<string | null>(null);
   const [phase, setPhase] = useState<LinkPhase>({ kind: "idle" });
@@ -167,7 +171,15 @@ function CreateChallengeInner() {
     const periodEnd = now + BigInt(durationDays * SECONDS_PER_DAY);
     // Challenges are proven by an uploaded record, so the goal is a document
     // goal. The marker routes the right verifier + badge; no contract change.
-    const encodedGoalSpec = withDocMarker(goal.trim());
+    // Opting into self-reported loosens the floor to also accept a photo, which
+    // is the low-trust tier and never marked verified. Default (off) stays a
+    // byte-identical "[doc]" document goal.
+    const encodedGoalSpec = acceptSelf
+      ? withProofPolicy(goal.trim(), {
+          floor: "document",
+          accepted: ["document", "self-reported"],
+        })
+      : withDocMarker(goal.trim());
 
     try {
       const depositHash = await runUsdcDeposit(rewardUsdc, {
@@ -321,6 +333,7 @@ function CreateChallengeInner() {
               setReward("");
               setMessage("");
               setTarget("");
+              setAcceptSelf(false);
             }}
             className="rounded-xl border border-edge px-5 py-3 text-sm font-medium text-muted hover:text-foreground"
           >
@@ -372,6 +385,20 @@ function CreateChallengeInner() {
           <span className="mt-1 block text-xs text-muted">
             What they have to do. Proven by an uploaded record - the reward pays
             the moment it is verified in a confidential enclave.
+          </span>
+        </label>
+
+        <label className="flex cursor-pointer items-start gap-3 rounded-xl border border-edge bg-surface-raised p-3">
+          <input
+            type="checkbox"
+            checked={acceptSelf}
+            onChange={(e) => setAcceptSelf(e.target.checked)}
+            className="mt-1"
+          />
+          <span className="text-xs font-normal text-muted">
+            Also accept a self-reported photo (low-trust). We cannot confirm a
+            photo is real, recent, or theirs, so it is never marked verified and
+            pays at 1x. Leave off to require a real record.
           </span>
         </label>
 

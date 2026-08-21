@@ -1,5 +1,6 @@
 import type { ReactNode } from "react";
 import { arcTxUrl } from "@/lib/chains";
+import type { ProofPolicy } from "@/lib/contract";
 
 /**
  * The minimum a thumb can reliably hit: 44px tall with room either side. Small
@@ -122,6 +123,28 @@ export function Badge({
   );
 }
 
+/**
+ * The trust-tier badge(s) for a pool's proof policy. Renders the floor tier and,
+ * when a verified-floor pool also opts into self-reported proof, a distinct
+ * warning-tone "Self-reported OK" chip. A self-reported FLOOR shows a single
+ * warning-tone "Self-reported" badge — it is never dressed up as verified. One
+ * source of truth so the pool card and the pool detail always agree.
+ */
+export function ProofTierBadges({ policy }: { policy: ProofPolicy }) {
+  const acceptsSelf = policy.accepted.includes("self-reported");
+  if (policy.floor === "self-reported") {
+    return <Badge tone="warning">Self-reported</Badge>;
+  }
+  return (
+    <>
+      <Badge tone={policy.floor === "document" ? "accent" : "muted"}>
+        {policy.floor === "document" ? "Document" : "Wearable"}
+      </Badge>
+      {acceptsSelf ? <Badge tone="warning">Self-reported OK</Badge> : null}
+    </>
+  );
+}
+
 // Honest-core primitives. Amounts, verdicts, and stamps render through these
 // three components with no slot for an adjective: the brand voice is loud
 // around the numbers, never inside them. Anything on screen that claims money
@@ -165,10 +188,33 @@ export function Money({
 export function Verdict({
   verified,
   confidence,
+  selfReported = false,
 }: {
   verified: boolean;
   confidence?: "low" | "medium" | "high";
+  /** The low-trust tier. When true, the badge NEVER reads "Verified": a
+   *  self-reported photo/screenshot cannot be confirmed real, recent, or the
+   *  participant's, and must be visually and semantically distinct from the
+   *  verified (wearable/document) tier. */
+  selfReported?: boolean;
 }) {
+  if (selfReported) {
+    return (
+      <span className="inline-flex flex-wrap items-center gap-2">
+        <span className="inline-flex items-center rounded-full border border-warning/40 bg-warning/10 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-warning">
+          Self-reported
+        </span>
+        <span className="text-xs uppercase tracking-wide text-muted">
+          unverified · low-trust
+        </span>
+        {confidence !== undefined ? (
+          <span className="text-xs uppercase tracking-wide text-muted">
+            {confidence} confidence
+          </span>
+        ) : null}
+      </span>
+    );
+  }
   return (
     <span className="inline-flex items-center gap-2">
       <span

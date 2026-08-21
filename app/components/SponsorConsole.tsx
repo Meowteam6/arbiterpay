@@ -95,7 +95,7 @@ function PortfolioSummary({ aggregates }: { aggregates: PoolAggregate[] }) {
         />
         <Stat label="Participants" value={<CountValue value={d.totalJoined} />} />
         <Stat
-          label="Verified completions"
+          label="Goal completions"
           value={<CountValue value={d.totalCompletions} />}
         />
       </div>

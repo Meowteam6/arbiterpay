@@ -20,6 +20,7 @@ import {
   claimStepIndex,
   type ClaimStep,
 } from "@/lib/claim-rail";
+import { railDeferredCopy } from "@/lib/proof-tier";
 
 /** How a non-paying claim ended, for the verdict step's one-line summary. */
 export type VerdictKind = "deferred" | "no-pay" | "stopped";
@@ -33,6 +34,9 @@ export interface ClaimRailState {
   verdict: VerdictKind | null;
   /** Paid step: present only when the ledger recorded a settled payout. */
   paid: { paidUsd: string; txHash: string | null } | null;
+  /** The low-trust tier. When true the deferred verdict NEVER reads "Verified":
+   *  a self-reported photo cannot be confirmed real, recent, or theirs. */
+  selfReported?: boolean;
 }
 
 const PRIVACY_LINE =
@@ -46,12 +50,28 @@ function dotClass(status: "done" | "active" | "todo"): string {
   return "h-3.5 w-3.5 rounded-full border border-edge bg-surface-raised";
 }
 
-function VerdictBody({ verdict }: { verdict: VerdictKind | null }) {
+function VerdictBody({
+  verdict,
+  selfReported = false,
+}: {
+  verdict: VerdictKind | null;
+  selfReported?: boolean;
+}) {
   if (verdict === "deferred") {
     return (
-      <div className="rounded-xl border border-accent/40 bg-accent-deep/30 p-3">
-        <p className="text-sm font-semibold text-accent">
-          Verified. Settles when the pool period ends.
+      <div
+        className={`rounded-xl border p-3 ${
+          selfReported
+            ? "border-warning/40 bg-warning/10"
+            : "border-accent/40 bg-accent-deep/30"
+        }`}
+      >
+        <p
+          className={`text-sm font-semibold ${
+            selfReported ? "text-warning" : "text-accent"
+          }`}
+        >
+          {railDeferredCopy(selfReported)}
         </p>
         <p className="mt-1 text-xs text-muted">
           SPOTTER pays out automatically the moment the period closes - no human
@@ -155,7 +175,10 @@ function StepList({ state }: { state: ClaimRailState }) {
                     <SpendMeter spentUsd={state.spentUsd} capUsd={state.capUsd} />
                   ) : null}
                   {meta.id === "verdict" ? (
-                    <VerdictBody verdict={state.verdict} />
+                    <VerdictBody
+                      verdict={state.verdict}
+                      selfReported={state.selfReported}
+                    />
                   ) : null}
                   {meta.id === "paid" ? <PaidBody paid={state.paid} /> : null}
                 </div>

@@ -92,6 +92,7 @@ describe("toPublicFeedClaim", () => {
         txHash: "0xsettle",
         periodEndIso: null,
       },
+      selfReported: false,
     });
   });
 
@@ -188,6 +189,7 @@ describe("toPublicFeedClaim", () => {
       spends: [],
       recordTxs: null,
       settle: null,
+      selfReported: false,
     });
   });
 
@@ -231,6 +233,25 @@ describe("toPublicFeedClaim", () => {
       spends: [],
       recordTxs: null,
       settle: null,
+      selfReported: false,
     });
+  });
+
+  it("marks a claim self-reported when a verdict carries the flag", () => {
+    const ledger: LedgerEntry[] = [
+      {
+        kind: "verdict",
+        at: AT,
+        verified: true,
+        confidence: "medium",
+        reason: "a gym selfie that plausibly shows the workout",
+        ref: "att-self-1",
+        selfReported: true,
+      },
+    ];
+    const claim = toPublicFeedClaim(GOAL, AT, ledger);
+    expect(claim.selfReported).toBe(true);
+    // The tier flag crosses, but the verdict prose never does.
+    expect(JSON.stringify(claim)).not.toContain("gym selfie");
   });
 });

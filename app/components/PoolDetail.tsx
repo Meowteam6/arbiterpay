@@ -11,7 +11,15 @@ import ChallengeContribute from "@/components/ChallengeContribute";
 import EvidenceUpload from "@/components/EvidenceUpload";
 import WearableCheck from "@/components/WearableCheck";
 import ClaimRail, { type ClaimRailState, type VerdictKind } from "@/components/ClaimRail";
-import { Badge, ErrorNote, Money, Skeleton, Stat, TAP_TARGET } from "@/components/ui";
+import {
+  Badge,
+  ErrorNote,
+  Money,
+  ProofTierBadges,
+  Skeleton,
+  Stat,
+  TAP_TARGET,
+} from "@/components/ui";
 import { arcAddressUrl } from "@/lib/chains";
 import {
   AGENT_WALLET_QUERY_KEY,
@@ -43,6 +51,8 @@ import {
   fetchParticipants,
   fetchPool,
   formatUsdc,
+  proofPolicyOf,
+  type Modality,
 } from "@/lib/contract";
 import { poolCanPay, poolPhase } from "@/lib/pool-lifecycle";
 import { useEmbeddedWallet } from "@/lib/wallet";
@@ -165,9 +175,6 @@ export default function PoolDetail({ id }: { id: string }) {
     staleTime: 15_000,
   });
 
-  const isWearableGoal =
-    poolQuery.data !== undefined &&
-    evidenceTypeOf(poolQuery.data.pool.goalSpec) === "wearable";
   const joined = participantQuery.data?.joined === true;
   const canPay =
     poolQuery.data !== undefined && poolCanPay(poolQuery.data.pool);
@@ -245,7 +252,6 @@ export default function PoolDetail({ id }: { id: string }) {
         : null;
   const restoredPath: ProofPath | null =
     claimLedger !== null ? claimProofPathOf(claimLedger) : null;
-  const proofPath: ProofPath = pinnedPath ?? restoredPath ?? "wearable";
 
   // Resolve the funder address to a handle when it has claimed one. Called
   // unconditionally with whatever is known this render (empty until the pool
@@ -338,6 +344,29 @@ export default function PoolDetail({ id }: { id: string }) {
   const evidenceType = evidenceTypeOf(pool.goalSpec);
   const isDocGoal = evidenceType === "document";
   const goalTitle = displayGoalSpec(pool.goalSpec);
+
+  // The proof policy is the single source of truth for how this pool may be
+  // proven: its floor (highest-trust modality) and the full accepted set. The
+  // prove surface renders one path per accepted modality; the mounted path is
+  // the visitor's tap, else the path their existing claim used, else the floor
+  // — clamped to the accepted set so a stale restore can never mount a modality
+  // the pool does not accept.
+  const policy = proofPolicyOf(pool.goalSpec);
+  const accepted = policy.accepted;
+  const multiPath = accepted.length > 1;
+  const candidatePath: Modality = pinnedPath ?? restoredPath ?? policy.floor;
+  const proofPath: Modality = accepted.includes(candidatePath)
+    ? candidatePath
+    : policy.floor;
+  // The upload path a wearable-floor pool can switch to from WearableCheck (a
+  // self-reported photo on a hybrid pool); undefined on a pure-wearable pool.
+  const uploadAltPath = accepted.find((m) => m !== "wearable");
+  // A self-reported claim (photo/screenshot) is the low-trust tier: the rail
+  // must never call it "Verified". Any self-reported verdict on the ledger
+  // marks the claim.
+  const claimIsSelfReported =
+    claimLedger?.some((e) => e.kind === "verdict" && e.selfReported === true) ===
+    true;
   // joinPool and backGoal revert with PERIOD_ENDED once the period closes,
   // so an expired pool must never offer either action. Evidence and the
   // receipt stay visible for joined participants until settlement runs.
@@ -349,10 +378,10 @@ export default function PoolDetail({ id }: { id: string }) {
   const providerDown = providerDownReason(providerQuery.data);
   const unverifiableNow = providerDown !== null && evidenceType === "wearable";
   const agentBroke = agentIsBroke(agentWalletQuery.data?.balanceUsd ?? null);
-  // Wait for the restore before mounting either tab; mounting the wrong one
-  // first would start a poll loop the correct tab then has to supersede.
+  // Wait for the restore before mounting a tab on a multi-path pool; mounting
+  // the wrong one first would start a poll loop the correct tab then supersedes.
   const claimPathPending =
-    isWearableGoal && joined && claimLedgerQuery.isLoading;
+    multiPath && joined && claimLedgerQuery.isLoading;
 
   // Claim-rail state, derived from the same ledger the receipt reads so the
   // rail and the workbench can never disagree. The paid step is the ONLY one
@@ -389,6 +418,7 @@ export default function PoolDetail({ id }: { id: string }) {
     capUsd: receipt?.capUsd ?? null,
     verdict,
     paid,
+    selfReported: claimIsSelfReported,
   };
   // The rail tracks a claim journey, so it shows only where one exists: a live
   // payable pool, or an expired one the visitor is joined to (their claim can
@@ -419,30 +449,32 @@ export default function PoolDetail({ id }: { id: string }) {
           </Link>
         </div>
       ) : null}
-      {evidenceType === "wearable" ? (
+      {multiPath ? (
         <div className="flex flex-wrap gap-2">
-          <button
-            type="button"
-            onClick={() => choosePath("wearable")}
-            className={`rounded-xl border ${TAP_TARGET} ${
-              proofPath === "wearable"
-                ? "border-accent/50 bg-accent-deep text-accent"
-                : "border-edge bg-surface-raised text-muted hover:text-foreground"
-            }`}
-          >
-            Verify from wearable
-          </button>
-          <button
-            type="button"
-            onClick={() => choosePath("document")}
-            className={`rounded-xl border ${TAP_TARGET} ${
-              proofPath === "document"
-                ? "border-accent/50 bg-accent-deep text-accent"
-                : "border-edge bg-surface-raised text-muted hover:text-foreground"
-            }`}
-          >
-            Upload proof instead
-          </button>
+          {accepted.map((m) => {
+            const selected = proofPath === m;
+            const tone = selected
+              ? m === "self-reported"
+                ? "border-warning/50 bg-warning/10 text-warning"
+                : "border-accent/50 bg-accent-deep text-accent"
+              : "border-edge bg-surface-raised text-muted hover:text-foreground";
+            const label =
+              m === "wearable"
+                ? "Verify from wearable"
+                : m === "document"
+                  ? "Upload proof"
+                  : "Upload a photo (self-reported)";
+            return (
+              <button
+                key={m}
+                type="button"
+                onClick={() => choosePath(m)}
+                className={`rounded-xl border ${TAP_TARGET} ${tone}`}
+              >
+                {label}
+              </button>
+            );
+          })}
         </div>
       ) : null}
       <section
@@ -454,14 +486,28 @@ export default function PoolDetail({ id }: { id: string }) {
             <Skeleton className="h-6 w-40" />
             <Skeleton className="h-16" />
           </div>
-        ) : evidenceType === "wearable" && proofPath === "wearable" ? (
+        ) : proofPath === "wearable" ? (
           <WearableCheck
             poolId={pool.id}
             goalSpec={pool.goalSpec}
-            onSwitchToDocument={() => choosePath("document")}
+            onSwitchToDocument={
+              uploadAltPath !== undefined
+                ? () => choosePath(uploadAltPath)
+                : undefined
+            }
+          />
+        ) : proofPath === "self-reported" ? (
+          <EvidenceUpload
+            poolId={pool.id}
+            goalSpec={pool.goalSpec}
+            modality="self-reported"
           />
         ) : (
-          <EvidenceUpload poolId={pool.id} goalSpec={pool.goalSpec} />
+          <EvidenceUpload
+            poolId={pool.id}
+            goalSpec={pool.goalSpec}
+            modality="document"
+          />
         )}
       </section>
     </>
@@ -480,9 +526,7 @@ export default function PoolDetail({ id }: { id: string }) {
         </Link>
         <div className="mt-3 flex flex-wrap items-center gap-2">
           <Badge>{pool.initiative}</Badge>
-          <Badge tone={isDocGoal ? "accent" : "muted"}>
-            {isDocGoal ? "Document" : "Wearable"}
-          </Badge>
+          <ProofTierBadges policy={policy} />
           {phase === "settled" ? (
             <Badge tone="muted">Settled</Badge>
           ) : phase === "expired" ? (

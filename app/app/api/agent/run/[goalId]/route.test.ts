@@ -263,6 +263,36 @@ describe("POST /api/agent/run/[goalId]", () => {
     expect(runAgentForGoal).not.toHaveBeenCalled();
   });
 
+  it("rejects a self-reported claim against a pool that does not accept it", async () => {
+    // The default pool is a pure "[doc]" document pool: it accepts document
+    // evidence only, so a self-reported submission is refused server-side,
+    // before the run loop can plan or spend.
+    const res = await post(GOAL, {
+      ...GOOD_BODY,
+      evidenceKind: "self-reported",
+    });
+    expect(res.status).toBe(400);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toMatch(/document/);
+    expect(runAgentForGoal).not.toHaveBeenCalled();
+  });
+
+  it("accepts a self-reported claim on a hybrid pool and threads the tier through", async () => {
+    // A "[proof=doc+self]" pool accepts both document and self-reported. A
+    // self-reported submission is allowed and reaches the run loop tagged as
+    // the self-reported tier.
+    fetchPool.mockResolvedValue(
+      pool({ goalSpec: "[proof=doc+self] get a flu shot this season" }),
+    );
+    const res = await post(GOAL, {
+      ...GOOD_BODY,
+      evidenceKind: "self-reported",
+    });
+    expect(res.status).toBe(200);
+    const input = runAgentForGoal.mock.calls[0][1] as { evidenceKind: string };
+    expect(input.evidenceKind).toBe("self-reported");
+  });
+
   it("rejects a document claim with no attesterId at all", async () => {
     const body: Record<string, unknown> = { ...GOOD_BODY };
     delete body.attesterId;
@@ -513,6 +543,7 @@ describe("GET /api/agent/run/[goalId]", () => {
         spends: [],
         recordTxs: null,
         settle: null,
+        selfReported: false,
       },
       access: "unproven",
       hasLedger: false,

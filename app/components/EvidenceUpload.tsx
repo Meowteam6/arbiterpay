@@ -164,13 +164,22 @@ function formatLocalTime(ms: number): string {
   });
 }
 
+/** Which upload tier this surface is proving. "document" is the verified tier
+ *  (a real record judged in the enclave); "self-reported" is the low-trust tier
+ *  (a photo/screenshot we cannot confirm is real, recent, or theirs). It never
+ *  presents as "verified". */
+type UploadModality = "document" | "self-reported";
+
 function EvidenceUploadInner({
   poolId,
   goalSpec,
+  modality,
 }: {
   poolId: bigint;
   goalSpec: string;
+  modality: UploadModality;
 }) {
+  const selfReported = modality === "self-reported";
   const { ready, authenticated, address } = useEmbeddedWallet();
   const requestAuth = useWalletAuth();
   const queryClient = useQueryClient();
@@ -239,6 +248,10 @@ function EvidenceUploadInner({
                 poolId: poolId.toString(),
                 address,
                 goalSpec,
+                // Declares the tier to the server, which enforces it against
+                // the pool's accepted set. A self-reported upload to a pool
+                // that only accepts a higher tier is refused server-side.
+                evidenceKind: modality,
               }),
             },
             requestAuth,
@@ -308,7 +321,7 @@ function EvidenceUploadInner({
         ledger: receiptToKeep(screen),
       });
     },
-    [address, poolId, goalSpec, queryClient, requestAuth],
+    [address, poolId, goalSpec, modality, queryClient, requestAuth],
   );
 
   // Restore on mount and on wallet change (defect M5): once the wallet
@@ -553,8 +566,9 @@ function EvidenceUploadInner({
       <div className="space-y-3">
         <h3 className="text-lg font-semibold">Handing it to SPOTTER</h3>
         <p className="text-sm text-muted">
-          Your document is going into the confidential enclave. Only the
-          verdict comes back out.
+          {selfReported
+            ? "Your photo is going into the confidential enclave for the read. Only the verdict comes back out, and the photo is never stored."
+            : "Your document is going into the confidential enclave. Only the verdict comes back out."}
         </p>
       </div>
     );
@@ -572,7 +586,7 @@ function EvidenceUploadInner({
   ) {
     return (
       <div className="space-y-4">
-        <AgentReceipt ledger={status.ledger} />
+        <AgentReceipt ledger={status.ledger} evidenceKind={modality} />
         <ErrorNote
           title="Lost contact with SPOTTER"
           detail={`${status.message} The receipt above is what already happened and nothing in it is lost.`}
@@ -647,7 +661,7 @@ function EvidenceUploadInner({
           />
         ) : null}
 
-        <AgentReceipt ledger={status.ledger} />
+        <AgentReceipt ledger={status.ledger} evidenceKind={modality} />
 
         {/* The run keeps going without a signature; only the rows are held
          *  back. Saying so beats a receipt that silently stops printing. */}
@@ -679,7 +693,9 @@ function EvidenceUploadInner({
         {status.runStatus === "recorded" ? (
           <div className="rounded-xl border border-edge bg-surface-raised p-4">
             <p className="text-base font-semibold">
-              Verified and recorded on-chain.
+              {selfReported
+                ? "Self-reported and recorded on-chain (unverified)."
+                : "Verified and recorded on-chain."}
             </p>
             {periodEndMs !== null ? (
               <p className="mt-1 text-sm text-foreground/80">
@@ -806,11 +822,32 @@ function EvidenceUploadInner({
 
   return (
     <div className="space-y-3">
-      <h3 className="text-lg font-semibold">Prove it.</h3>
+      <div className="flex flex-wrap items-center gap-2">
+        <h3 className="text-lg font-semibold">
+          {selfReported ? "Self-report it." : "Prove it."}
+        </h3>
+        {selfReported ? (
+          <span className="inline-flex items-center rounded-full border border-warning/40 bg-warning/10 px-3 py-1 text-xs font-semibold uppercase tracking-wide text-warning">
+            Self-reported · low-trust
+          </span>
+        ) : null}
+      </div>
+      {selfReported ? (
+        <p className="rounded-xl border border-warning/40 bg-warning/10 p-3 text-xs text-foreground/80">
+          This is the low-trust tier and still in development. We cannot confirm
+          a photo is real, recent, or yours, so it is never marked verified. The
+          payout is capped and the pool creator chose to accept unverified
+          proof.
+        </p>
+      ) : null}
       <p className="text-sm text-muted">
-        {readableGoal === ""
-          ? "Scale photo, gym selfie, lab PDF, screenshot of your watch at 2am."
-          : `Proof for "${readableGoal}": scale photo, gym selfie, lab PDF, screenshot of your watch at 2am.`}{" "}
+        {selfReported
+          ? readableGoal === ""
+            ? "Snap a photo or screenshot that shows it. "
+            : `A photo or screenshot for "${readableGoal}". `
+          : readableGoal === ""
+            ? "Scale photo, gym selfie, lab PDF, screenshot of your watch at 2am. "
+            : `Proof for "${readableGoal}": scale photo, gym selfie, lab PDF, screenshot of your watch at 2am. `}
         SPOTTER works out what it is looking at and buys what it needs. Messy
         is fine. Fake is not.
       </p>
@@ -898,9 +935,13 @@ function EvidenceUploadInner({
 export default function EvidenceUpload({
   poolId,
   goalSpec,
+  modality = "document",
 }: {
   poolId: bigint;
   goalSpec: string;
+  /** The upload tier. Defaults to "document" (verified) so existing callers are
+   *  unchanged; the self-reported surface passes "self-reported" explicitly. */
+  modality?: UploadModality;
 }) {
   if (!DYNAMIC_CONFIGURED) {
     return (
@@ -910,5 +951,11 @@ export default function EvidenceUpload({
       />
     );
   }
-  return <EvidenceUploadInner poolId={poolId} goalSpec={goalSpec} />;
+  return (
+    <EvidenceUploadInner
+      poolId={poolId}
+      goalSpec={goalSpec}
+      modality={modality}
+    />
+  );
 }

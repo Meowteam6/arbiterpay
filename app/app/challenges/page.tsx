@@ -50,14 +50,17 @@ import {
 } from "@/components/ui";
 import {
   displayGoalSpec,
+  fetchGoalId,
   fetchParticipant,
   fetchParticipants,
   fetchPool,
   fetchPools,
+  fetchProofTier,
   formatUsdc,
   type ParticipantInfo,
   type PoolInfo,
 } from "@/lib/contract";
+import { challengeAwaitingSettleStatus, type ProofTier } from "@/lib/proof-tier";
 import { challengeShareUrl } from "@/lib/challenges";
 import { fetchWithWalletAuth, type WalletAuthRequester } from "@/lib/client-auth";
 import { useEmbeddedWallet } from "@/lib/wallet";
@@ -71,6 +74,10 @@ const CHALLENGE_INITIATIVE = "challenge";
 interface InChallenge {
   pool: PoolInfo;
   participant: ParticipantInfo;
+  /** On-chain trust tier for a recorded-but-unsettled challenge, so its status
+   *  badge never reads "Verified" for a self-reported claim. null when the
+   *  challenge has no pending passing verdict (status does not need it). */
+  tier: ProofTier | null;
 }
 
 interface SentChallenge {
@@ -126,12 +133,31 @@ async function fetchMyChallenges(
   // Aimed at you: a challenge you joined that somebody else created. Excluding
   // your own pools keeps "@creator challenged you" honest and keeps a pool from
   // showing in both sections at once.
-  const inChallenges: InChallenge[] = challengePools
+  const joinedChallenges = challengePools
     .map((pool, i) => ({ pool, participant: participants[i] }))
     .filter(
       (entry) =>
         entry.participant.joined && !sameAddress(entry.pool.creator, address),
     );
+
+  // Resolve the on-chain trust tier for challenges whose result is recorded and
+  // passing but not yet settled - the only state whose badge could otherwise
+  // over-claim "Verified". A read miss leaves the tier "unknown" (never
+  // verified). Every other challenge needs no tier and carries null.
+  const inChallenges: InChallenge[] = await Promise.all(
+    joinedChallenges.map(async (entry): Promise<InChallenge> => {
+      const p = entry.participant;
+      if (!(p.resultRecorded && p.verdict && !entry.pool.settled)) {
+        return { ...entry, tier: null };
+      }
+      try {
+        const goalId = await fetchGoalId(entry.pool.id, address);
+        return { ...entry, tier: await fetchProofTier(goalId) };
+      } catch {
+        return { ...entry, tier: "unknown" };
+      }
+    }),
+  );
 
   // Sent by you: any challenge pool you created.
   const sentPools = challengePools.filter((pool) =>
@@ -224,11 +250,14 @@ async function fetchInvitedChallenges(
 function challengeStatus(
   pool: PoolInfo,
   p: ParticipantInfo,
+  tier: ProofTier | null,
 ): { label: string; tone: "accent" | "muted" | "warning" } {
   if (p.resultRecorded && p.verdict) {
+    // Awaiting settle: a self-reported challenge is a real, pending win but must
+    // never read "Verified". Its tier decides the badge.
     return pool.settled
       ? { label: "Paid", tone: "accent" }
-      : { label: "Verified - awaiting settle", tone: "accent" };
+      : challengeAwaitingSettleStatus(tier);
   }
   if (p.resultRecorded && !p.verdict) {
     return { label: "Goal missed", tone: "muted" };
@@ -287,7 +316,7 @@ function InChallengeCard({
   challengerName: string;
 }) {
   const { pool, participant } = entry;
-  const status = challengeStatus(pool, participant);
+  const status = challengeStatus(pool, participant, entry.tier);
   // Nothing recorded yet means the proof is still owed - lead with the upload.
   const needsProof = !participant.resultRecorded;
   const id = pool.id.toString();
