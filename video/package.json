@@ -1,0 +1,26 @@
+{
+  "name": "gohealthme-video",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Programmatic Remotion demo for GoHealthMe. Reuses the real product sprites, design tokens, and i18n copy. One composition, rendered in EN / zh / fil across 1:1, 9:16, 16:9.",
+  "scripts": {
+    "dev": "remotion studio src/index.ts",
+    "render:linkedin": "remotion render src/index.ts Square out/gohealthme-en-square.mp4 --props='{\"lang\":\"en\"}'",
+    "render:reels": "remotion render src/index.ts Vertical out/gohealthme-en-vertical.mp4 --props='{\"lang\":\"en\"}'",
+    "render:landscape": "remotion render src/index.ts Landscape out/gohealthme-en-landscape.mp4 --props='{\"lang\":\"en\"}'",
+    "render:all": "node render-matrix.mjs",
+    "still:drop": "remotion still src/index.ts Landscape out/check-drop.png --frame=780 --props='{\"lang\":\"en\"}'",
+    "still:current": "remotion still src/index.ts Landscape out/check-current.png --frame=1250 --props='{\"lang\":\"en\"}'"
+  },
+  "dependencies": {
+    "@remotion/cli": "^4.0.514",
+    "@remotion/google-fonts": "^4.0.514",
+    "react": "19.0.0",
+    "react-dom": "19.0.0",
+    "remotion": "^4.0.514"
+  },
+  "devDependencies": {
+    "@types/react": "^19",
+    "typescript": "^5.4.5"
+  }
+}
