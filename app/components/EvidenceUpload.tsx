@@ -658,6 +658,9 @@ function EvidenceUploadInner({
           <PayoutMoment
             paidUsd={toUsd2(paid.paidUsd)}
             txHash={paid.txHash ?? null}
+            selfReported={status.ledger.some(
+              (e) => e.kind === "verdict" && e.selfReported === true,
+            )}
           />
         ) : null}
 
