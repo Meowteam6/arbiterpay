@@ -150,6 +150,7 @@ export default function PoolsPage() {
         subtitle="Live sponsor-funded pools on Arc testnet. Join with your wallet, hit the goal, get paid in USDC. Testnet USDC only, no real value."
         pose="spotter-standing.png"
         poseAlt="SPOTTER the otter, standing, ready to point you at a pool"
+        spotterLine="Somebody put money up. It's just sitting there. Rude not to."
       >
         <div className="mt-4 flex flex-wrap items-center gap-2">
           <Badge tone="muted">Arc Testnet</Badge>

@@ -14,6 +14,7 @@ export default function DashboardPage() {
         subtitle="What you said you would do, and what SPOTTER has paid you for it."
         pose="spotter-lounging.png"
         poseAlt="SPOTTER the otter lounging with a gold coin, payday"
+        spotterLine="I hold the wallet. You hold the streak."
       />
       {DYNAMIC_CONFIGURED ? (
         <DashboardContent />

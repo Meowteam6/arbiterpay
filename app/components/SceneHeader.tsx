@@ -11,6 +11,7 @@ export default function SceneHeader({
   pose,
   poseAlt,
   eyebrow,
+  spotterLine,
   children,
 }: {
   title: string;
@@ -19,6 +20,8 @@ export default function SceneHeader({
   pose: string;
   poseAlt: string;
   eyebrow?: string;
+  /** A deadpan SPOTTER line, shown as a small speech bubble beside the otter. */
+  spotterLine?: string;
   children?: ReactNode;
 }) {
   return (
@@ -53,12 +56,19 @@ export default function SceneHeader({
           ) : null}
           {children}
         </div>
-        {/* eslint-disable-next-line @next/next/no-img-element */}
-        <img
-          src={`/spotter/${pose}`}
-          alt={poseAlt}
-          className="otter-float relative -mb-1 hidden h-44 w-auto shrink-0 drop-shadow-xl sm:block sm:h-56"
-        />
+        <div className="relative hidden shrink-0 self-end sm:block">
+          {spotterLine !== undefined ? (
+            <div className="absolute right-full top-4 z-10 mr-1 w-40 rounded-2xl rounded-br-sm border border-edge bg-surface px-3 py-2 text-xs font-medium leading-snug text-foreground shadow-sm md:w-48">
+              {spotterLine}
+            </div>
+          ) : null}
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={`/spotter/${pose}`}
+            alt={poseAlt}
+            className="otter-float -mb-1 h-44 w-auto drop-shadow-xl sm:h-56"
+          />
+        </div>
       </div>
     </section>
   );
