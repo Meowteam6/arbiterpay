@@ -14,6 +14,7 @@ import { toUsd2 } from "@/lib/agent-receipt";
 import type { PublicFeedClaim } from "@/lib/server/agent/feed-view";
 import { settleMomentLine } from "@/components/AgentReceipt";
 import { EmptyState, Money, Skeleton } from "@/components/ui";
+import SpotterSays from "@/components/SpotterSays";
 
 // Where the empty state sends a first-time visitor. Pool 13 is picked
 // deliberately: it is a [doc] pool with bountyModel = 1 (pro-rata split) and a
@@ -219,7 +220,9 @@ export default function AgentConsole() {
             ))}
           </ol>
         ) : (
-          <EmptyState
+          <div className="space-y-4">
+            <SpotterSays surface="agent-empty" state="empty" />
+            <EmptyState
             title="SPOTTER has done nothing yet."
             detail="Join a pool, upload a record, and SPOTTER buys the verification and pays out here."
             action={
@@ -230,7 +233,8 @@ export default function AgentConsole() {
                 Give it something to verify
               </Link>
             }
-          />
+            />
+          </div>
         )}
       </section>
     </div>
