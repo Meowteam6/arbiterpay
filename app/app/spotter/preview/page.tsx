@@ -10,9 +10,12 @@ import PayoutMoment from "@/components/PayoutMoment";
 
 export default function PayoutPreview() {
   const [selfReported, setSelfReported] = useState(false);
+  const [initialOpen, setInitialOpen] = useState(true);
   useEffect(() => {
-    const tier = new URLSearchParams(window.location.search).get("tier");
-    setSelfReported(tier === "self");
+    const params = new URLSearchParams(window.location.search);
+    setSelfReported(params.get("tier") === "self");
+    // ?view=receipt previews the left-behind receipt (takeover pre-dismissed).
+    setInitialOpen(params.get("view") !== "receipt");
   }, []);
 
   return (
@@ -20,6 +23,7 @@ export default function PayoutPreview() {
       paidUsd="50.00"
       txHash="0x1111111111111111111111111111111111111111111111111111111111111111"
       selfReported={selfReported}
+      initialOpen={initialOpen}
     />
   );
 }

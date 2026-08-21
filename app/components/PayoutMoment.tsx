@@ -19,31 +19,55 @@ export default function PayoutMoment({
   paidUsd,
   txHash,
   selfReported = false,
+  initialOpen = true,
 }: {
   paidUsd: string;
   txHash: string | null;
   /** The low-trust tier. When true the moment NEVER claims "verified". */
   selfReported?: boolean;
+  /** Dev/preview only: start with the takeover already dismissed. */
+  initialOpen?: boolean;
 }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(initialOpen);
+
+  const tierChip = selfReported ? (
+    <span className="inline-flex items-center rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-warning">
+      Self-reported
+    </span>
+  ) : (
+    <span className="inline-flex items-center rounded-full border border-accent/30 bg-accent/12 px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-accent-strong">
+      Verified
+    </span>
+  );
 
   // The record left behind after the takeover is dismissed - the event becomes
-  // the receipt.
+  // a warm little receipt, SPOTTER still holding your coin. Not a flat gold box.
   const record = (
-    <div className="rounded-2xl border border-gold/40 bg-gold-deep/15 p-6 text-center">
-      <Stamp tone="gold">Paid</Stamp>
-      <p className="mt-4">
-        <Money usd={paidUsd} tone="gold" sign="+" size="xl" />
-      </p>
-      <p className="mt-2 text-base font-semibold text-foreground">
-        SPOTTER paid you.
-      </p>
-      <p className="mt-1 text-sm text-muted">Absolute unit. Run it back.</p>
-      {txHash !== null ? (
-        <p className="mt-4">
-          <ArcTxLink txHash={txHash} label="View the payout on Arcscan" />
+    <div className="flex items-center gap-4 rounded-2xl border border-edge bg-surface p-5 shadow-sm sm:gap-5 sm:p-6">
+      {/* eslint-disable-next-line @next/next/no-img-element */}
+      <img
+        src="/spotter/spotter-payday.png"
+        alt="SPOTTER the otter with your coin"
+        className="h-20 w-auto shrink-0 sm:h-24"
+      />
+      <div className="min-w-0">
+        <div className="flex flex-wrap items-center gap-2">
+          <Stamp tone="gold">Paid</Stamp>
+          {tierChip}
+        </div>
+        <p className="mt-2">
+          <Money usd={paidUsd} tone="gold" sign="+" size="xl" />
         </p>
-      ) : null}
+        <p className="mt-1 text-sm font-semibold text-foreground">
+          SPOTTER paid you.
+        </p>
+        <p className="text-sm text-muted">Absolute unit. Run it back.</p>
+        {txHash !== null ? (
+          <p className="mt-2">
+            <ArcTxLink txHash={txHash} label="View on Arcscan" />
+          </p>
+        ) : null}
+      </div>
     </div>
   );
 
