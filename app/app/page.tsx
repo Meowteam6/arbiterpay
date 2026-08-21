@@ -63,7 +63,7 @@ export default function Home() {
               href="/challenge/new"
               className="inline-flex items-center gap-2 rounded-xl border border-accent/40 bg-accent/10 px-6 py-3 text-sm font-semibold text-accent-strong hover:bg-accent/15"
             >
-              or dare a friend and put money on it
+              or dare a friend and put up a reward
               <span aria-hidden="true">-&gt;</span>
             </Link>
             <p className="mt-2 max-w-md text-xs text-muted">
@@ -171,7 +171,7 @@ export default function Home() {
             <p className="text-sm font-semibold">A reward, not a bet</p>
             <p className="mt-1 text-sm leading-relaxed text-muted">
               A sponsor — or you — puts the money up. You show up for yourself and
-              collect. Nobody wagers anything against anybody.
+              collect. Nobody is pitted against anybody.
             </p>
           </div>
           <div>
