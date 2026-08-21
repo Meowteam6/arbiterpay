@@ -8,6 +8,7 @@ import JoinPool from "@/components/JoinPool";
 import BackGoal from "@/components/BackGoal";
 import FundPool from "@/components/FundPool";
 import ChallengeContribute from "@/components/ChallengeContribute";
+import PoolVisibilityToggle from "@/components/PoolVisibilityToggle";
 import EvidenceUpload from "@/components/EvidenceUpload";
 import WearableCheck from "@/components/WearableCheck";
 import ClaimRail, { type ClaimRailState, type VerdictKind } from "@/components/ClaimRail";
@@ -86,7 +87,22 @@ interface ClaimLedgerData {
   hasLedger: boolean;
 }
 
-export default function PoolDetail({ id }: { id: string }) {
+export default function PoolDetail({
+  id,
+  initialPrivate,
+  tokenAccess = false,
+}: {
+  id: string;
+  /** Server-resolved effective visibility (true = private). Decides the
+   *  stranger gate below without a client flash. When omitted it falls back to
+   *  the immutable initiative signal, so a challenge is never accidentally
+   *  exposed by a caller that forgot to pass it. */
+  initialPrivate?: boolean;
+  /** The viewer reached this pool through its unguessable private link, so the
+   *  stranger gate is lifted for them even if they are neither creator nor
+   *  participant. Set by the /p/[token] landing. */
+  tokenAccess?: boolean;
+}) {
   const { address } = useEmbeddedWallet();
   const requestAuth = useWalletAuth();
   // Wearable pools offer two proof paths, but only one may be mounted at a
@@ -302,21 +318,28 @@ export default function PoolDetail({ id }: { id: string }) {
 
   const { pool, asOfSeconds } = poolQuery.data;
 
-  // A challenge is a private, person-aimed dare. Its goal (health-adjacent),
-  // the challenger's @handle, and the "challenge" initiative badge are for the
-  // people who belong here only: the target once they have joined through the
-  // invite link, and the creator. Every other visitor - including a stranger
-  // walking sequential /pools/<n> ids - gets a neutral notice with no goal, no
-  // handle, no badge, and no money action. Challenge-ness is the immutable
-  // on-chain initiative, never the Supabase challenges row (which can be absent).
+  // isChallenge stays keyed on the immutable on-chain initiative because it
+  // governs the PAYOUT mechanic (the sweep-disclosure ChallengeContribute
+  // funnel far below), which is a property of how the pool pays, not of who may
+  // see it. Visibility is a separate, MUTABLE concern.
   const isChallenge = pool.initiative === "challenge";
   const isCreator =
     address !== null && address.toLowerCase() === pool.creator.toLowerCase();
-  if (isChallenge && !joined && !isCreator) {
+
+  // A private pool (a person-aimed challenge, or a sponsor pool the owner
+  // marked private) shows its health-adjacent goal, the funder's @handle, and
+  // its money actions to the people who belong here only: a joined participant,
+  // the creator, and anyone who arrived through the unguessable private link.
+  // Every other visitor - including a stranger walking sequential /pools/<n>
+  // ids - gets a neutral notice. The visibility signal is the server-resolved
+  // flag (store-first, mutable); when it was not passed, the immutable
+  // initiative is the fail-safe fallback so a challenge is never exposed.
+  const gatePrivate = initialPrivate ?? isChallenge;
+  if (gatePrivate && !joined && !isCreator && !tokenAccess) {
     // Signed in but participant status still loading: we cannot yet tell a
-    // joined target from a stranger, so hold on a neutral skeleton rather than
-    // flashing the private notice at someone who came in through their link.
-    // Nothing about the challenge is revealed either way.
+    // joined participant from a stranger, so hold on a neutral skeleton rather
+    // than flashing the private notice at someone who belongs here. Nothing
+    // about the pool is revealed either way.
     if (address !== null && participantQuery.isLoading) {
       return (
         <div className="space-y-4">
@@ -329,10 +352,10 @@ export default function PoolDetail({ id }: { id: string }) {
     return (
       <div className="mx-auto max-w-md py-12 text-center">
         <h1 className="text-2xl font-bold tracking-tight">
-          This is a private challenge
+          This pool is private
         </h1>
         <p className="mt-3 text-sm text-muted">
-          Open it from the invite link you were sent. That link carries the
+          Open it from the private link you were sent. That link carries the
           details this page keeps private.
         </p>
         <BrowsePoolsLink label="Browse open pools instead" />
@@ -585,6 +608,10 @@ export default function PoolDetail({ id }: { id: string }) {
         <Stat label="Starts" value={formatDay(pool.periodStart)} />
         <Stat label="Ends" value={formatDay(pool.periodEnd)} />
       </div>
+
+      {isCreator ? (
+        <PoolVisibilityToggle poolId={pool.id} initialPrivate={gatePrivate} />
+      ) : null}
 
       {phase === "live" ? (
         <div className="space-y-4">

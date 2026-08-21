@@ -57,10 +57,12 @@ const CHALLENGE_ENTRY_FEE = 0n;
 const CHALLENGE_BOUNTY_MODEL = 1;
 const CHALLENGE_INITIATIVE = "challenge";
 
+type Visibility = "public" | "private";
+
 type LinkPhase =
   | { kind: "idle" }
   | { kind: "linking" }
-  | { kind: "done"; url: string; poolId: string }
+  | { kind: "done"; url: string; poolId: string; listedPublic: boolean }
   | { kind: "error"; message: string };
 
 /** Tap-to-copy for the finished challenge link. A share link is not a wallet
@@ -131,6 +133,10 @@ function CreateChallengeInner() {
   // photo, which loosens the floor to also allow the low-trust tier.
   const [acceptSelf, setAcceptSelf] = useState(false);
   const [durationDays, setDurationDays] = useState(30);
+  // A challenge is a person-aimed dare, so it defaults to private (unlisted,
+  // reachable only by the invite link). The challenger can choose to also list
+  // it publicly, which writes a public visibility row after the link is minted.
+  const [visibility, setVisibility] = useState<Visibility>("private");
   const [formError, setFormError] = useState<string | null>(null);
   const [phase, setPhase] = useState<LinkPhase>({ kind: "idle" });
 
@@ -258,12 +264,37 @@ function CreateChallengeInner() {
         });
         return;
       }
+      // A challenge is private by default via its "challenge" initiative, so no
+      // visibility row is needed to keep it unlisted. Only an explicit Public
+      // choice writes a row, listing it on the board and the feed. The write
+      // reuses the credential just cached by the /api/challenges call, so it
+      // does not prompt for a second signature. If it fails, the challenge
+      // simply stays private (safe) and the done screen says so.
+      let listedPublic = false;
+      if (visibility === "public") {
+        try {
+          const visRes = await fetchWithWalletAuth(
+            `/api/pools/${poolId.toString()}/visibility`,
+            {
+              method: "POST",
+              headers: { "content-type": "application/json" },
+              body: JSON.stringify({ address, visibility: "public" }),
+            },
+            requestAuth,
+          );
+          listedPublic = visRes.response.ok;
+        } catch {
+          listedPublic = false;
+        }
+      }
+
       const origin =
         typeof window === "undefined" ? "" : window.location.origin;
       setPhase({
         kind: "done",
         url: challengeShareUrl(origin, token),
         poolId: poolId.toString(),
+        listedPublic,
       });
     } catch {
       // useUsdcDeposit already captured any deposit error into status; surface
@@ -294,6 +325,16 @@ function CreateChallengeInner() {
             accept and go for the goal - they pay nothing, and the reward pays
             out the moment they prove they hit it.
           </p>
+          {phase.listedPublic ? (
+            <p className="text-xs font-medium text-foreground/70">
+              It is also listed on the public pools board.
+            </p>
+          ) : visibility === "public" ? (
+            <p className="text-xs font-medium text-warning">
+              It could not be listed publicly, so it stays private and reachable
+              only by this link. You can make it public later from the pool page.
+            </p>
+          ) : null}
         </div>
 
         <div className="space-y-3">
@@ -313,7 +354,10 @@ function CreateChallengeInner() {
           <CopyLink url={phase.url} />
           <p className="text-xs text-muted">
             Anyone with this link can see the dare and accept it, so send it
-            straight to them. It is not listed anywhere and cannot be guessed.
+            straight to them.
+            {phase.listedPublic
+              ? " The goal is also on the public board."
+              : " It is not listed anywhere and cannot be guessed."}
           </p>
         </div>
 
@@ -334,6 +378,7 @@ function CreateChallengeInner() {
               setMessage("");
               setTarget("");
               setAcceptSelf(false);
+              setVisibility("private");
             }}
             className="rounded-xl border border-edge px-5 py-3 text-sm font-medium text-muted hover:text-foreground"
           >
@@ -472,6 +517,45 @@ function CreateChallengeInner() {
             Starts the moment you send it.
           </span>
         </div>
+
+        <fieldset className="block text-sm font-medium">
+          <legend>Who can see it</legend>
+          <div className="mt-2 grid gap-2 sm:grid-cols-2">
+            <button
+              type="button"
+              onClick={() => setVisibility("private")}
+              className={`rounded-xl border p-3 text-left ${
+                visibility === "private"
+                  ? "border-accent/50 bg-accent-deep text-accent"
+                  : "border-edge bg-surface-raised text-muted hover:text-foreground"
+              }`}
+            >
+              <span className="block font-semibold">Private</span>
+              <span className="block text-xs font-normal">
+                Only the person you send the link to can see it. Not listed
+                anywhere.
+              </span>
+            </button>
+            <button
+              type="button"
+              onClick={() => setVisibility("public")}
+              className={`rounded-xl border p-3 text-left ${
+                visibility === "public"
+                  ? "border-accent/50 bg-accent-deep text-accent"
+                  : "border-edge bg-surface-raised text-muted hover:text-foreground"
+              }`}
+            >
+              <span className="block font-semibold">Public</span>
+              <span className="block text-xs font-normal">
+                Also listed on the pools board, so anyone can see the goal and
+                cheer them on.
+              </span>
+            </button>
+          </div>
+          <span className="mt-1 block text-xs font-normal text-muted">
+            You can change this any time from the pool page.
+          </span>
+        </fieldset>
 
         <SignInGate note="Sign in to send this challenge.">
           {(openSignIn) => (

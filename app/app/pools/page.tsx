@@ -28,6 +28,7 @@ import {
   TAP_TARGET,
 } from "@/components/ui";
 import { fetchParticipants, fetchPools, type PoolInfo } from "@/lib/contract";
+import { fetchPoolVisibilities } from "@/lib/pool-visibility-client";
 import {
   groupPoolsByPhase,
   poolCanPay,
@@ -72,23 +73,49 @@ export default function PoolsPage() {
     refetchInterval: 45_000,
   });
 
+  // Drop pools that structurally cannot pay before anything else, so they never
+  // reach the joinable list. Two such pools were live and sorted to the top of
+  // the page advertising the largest bounties on it, the worst thing to hand a
+  // first-time visitor: they would join, upload, verify, and be paid nothing by
+  // a transaction that succeeds.
+  const payablePools = useMemo(
+    () => poolsQuery.data?.pools.filter(poolCanPay) ?? null,
+    [poolsQuery.data],
+  );
+  const payableIds = useMemo(
+    () => (payablePools ?? []).map((pool) => pool.id.toString()),
+    [payablePools],
+  );
+
+  // Private pools - a person-aimed challenge, or a sponsor pool the owner marked
+  // private - must never appear on the public board even when live and payable.
+  // Visibility is the MUTABLE, owner-owned flag resolved server-side (store
+  // first, initiative default), fetched here for exactly the payable ids. It is
+  // no longer the immutable on-chain initiative: a challenge the owner opened up
+  // now shows, a sponsor pool the owner locked down now hides. An id the route
+  // does not answer for is absent from the map, so the "=== public" filter below
+  // drops it - a pool of unknown visibility is never listed.
+  const visibilityQuery = useQuery({
+    queryKey: ["pool-visibility", payableIds.join(",")],
+    queryFn: () => fetchPoolVisibilities(payableIds),
+    enabled: payablePools !== null,
+    staleTime: 30_000,
+  });
+
   const grouped = useMemo(() => {
-    if (poolsQuery.data === undefined) return null;
-    // Drop pools that structurally cannot pay before grouping, so they never
-    // reach the joinable list. Two such pools were live and sorted to the top
-    // of the page advertising the largest bounties on it, which is the worst
-    // possible thing to hand a first-time visitor: they would join, upload,
-    // verify, and be paid nothing by a transaction that succeeds.
-    // Challenge pools are private, person-aimed dares reached only by their
-    // unguessable link. They must never appear on the public board even when
-    // live and payable, so drop them here alongside the unpayable ones. The
-    // signal is the immutable on-chain initiative, already on PoolInfo - never
-    // the Supabase challenges row, which can be missing.
-    const payable = poolsQuery.data.pools
-      .filter(poolCanPay)
-      .filter((pool) => pool.initiative !== "challenge");
-    return groupPoolsByPhase(payable, poolsQuery.data.asOfSeconds);
-  }, [poolsQuery.data]);
+    if (
+      payablePools === null ||
+      poolsQuery.data === undefined ||
+      visibilityQuery.data === undefined
+    ) {
+      return null;
+    }
+    const visibility = visibilityQuery.data;
+    const publicPools = payablePools.filter(
+      (pool) => visibility[pool.id.toString()] === "public",
+    );
+    return groupPoolsByPhase(publicPools, poolsQuery.data.asOfSeconds);
+  }, [payablePools, poolsQuery.data, visibilityQuery.data]);
 
   // Only expired pools need a head count: it is what separates "settlement
   // still has work to do here" from "this can never pay anyone". Live and
@@ -192,9 +219,34 @@ export default function PoolsPage() {
             void poolsQuery.refetch();
           }}
         />
-      ) : grouped === null ||
-        grouped.live.length + grouped.expired.length + grouped.settled.length ===
-          0 ? (
+      ) : visibilityQuery.isError ? (
+        // Without the visibility flags the board cannot tell public from private
+        // pools, and showing everything would leak a private dare. Surface the
+        // error and offer a retry rather than render a fake-empty or fake-full
+        // board.
+        <ErrorNote
+          title="Could not load pools"
+          detail={
+            visibilityQuery.error instanceof Error
+              ? visibilityQuery.error.message
+              : "Could not check which pools are public."
+          }
+          onRetry={() => {
+            void visibilityQuery.refetch();
+          }}
+        />
+      ) : grouped === null ? (
+        // Pools are in; the visibility flags are still resolving. Hold on
+        // skeletons rather than flashing an empty board.
+        <div className="grid gap-4 sm:grid-cols-2">
+          <PoolCardSkeleton />
+          <PoolCardSkeleton />
+          <PoolCardSkeleton />
+        </div>
+      ) : grouped.live.length +
+          grouped.expired.length +
+          grouped.settled.length ===
+        0 ? (
         <EmptyState
           title="No pools yet"
           detail="Pools appear here the moment a sponsor creates one on Arc. Be the first to fund a bounty."
