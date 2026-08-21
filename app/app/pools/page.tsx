@@ -20,6 +20,7 @@ import Link from "next/link";
 import { useMemo } from "react";
 import { useQuery } from "@tanstack/react-query";
 import PoolCard from "@/components/PoolCard";
+import SceneHeader from "@/components/SceneHeader";
 import {
   Badge,
   EmptyState,
@@ -144,24 +145,17 @@ export default function PoolsPage() {
 
   return (
     <div className="space-y-6">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="flex flex-wrap items-center gap-3">
-            <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
-              Bounty pools
-            </h1>
-            <Badge tone="warning">Arc Testnet</Badge>
-          </div>
-          <p className="mt-1 text-sm text-muted">
-            Live sponsor-funded pools on Arc testnet. Join with your wallet,
-            hit the goal, get paid in USDC. USDC here is testnet only and has
-            no real value.
-          </p>
-        </div>
-        <div className="flex flex-wrap gap-2">
+      <SceneHeader
+        title="Bounty pools"
+        subtitle="Live sponsor-funded pools on Arc testnet. Join with your wallet, hit the goal, get paid in USDC. Testnet USDC only, no real value."
+        pose="spotter-standing.png"
+        poseAlt="SPOTTER the otter, standing, ready to point you at a pool"
+      >
+        <div className="mt-4 flex flex-wrap items-center gap-2">
+          <Badge tone="muted">Arc Testnet</Badge>
           <Link
             href="/challenge/new"
-            className={`rounded-xl border border-accent/50 bg-accent-deep/30 font-semibold text-accent hover:bg-accent-deep/50 ${TAP_TARGET}`}
+            className={`rounded-xl border border-accent/40 bg-accent/10 font-semibold text-accent-strong hover:bg-accent/15 ${TAP_TARGET}`}
           >
             Challenge a friend
           </Link>
@@ -172,7 +166,7 @@ export default function PoolsPage() {
             Create pool
           </Link>
         </div>
-      </div>
+      </SceneHeader>
 
       {poolsQuery.isLoading ? (
         <div className="grid gap-4 sm:grid-cols-2">

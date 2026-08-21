@@ -3,19 +3,18 @@
 import Link from "next/link";
 import { DYNAMIC_CONFIGURED } from "@/lib/config";
 import DashboardContent from "@/components/DashboardContent";
+import SceneHeader from "@/components/SceneHeader";
 import { EmptyState } from "@/components/ui";
 
 export default function DashboardPage() {
   return (
     <div className="space-y-6">
-      <div>
-        <h1 className="text-2xl font-bold tracking-tight sm:text-3xl">
-          My goals
-        </h1>
-        <p className="mt-1 text-sm text-muted">
-          What you said you would do, and what SPOTTER has paid you for it.
-        </p>
-      </div>
+      <SceneHeader
+        title="My goals"
+        subtitle="What you said you would do, and what SPOTTER has paid you for it."
+        pose="spotter-lounging.png"
+        poseAlt="SPOTTER the otter lounging with a gold coin, payday"
+      />
       {DYNAMIC_CONFIGURED ? (
         <DashboardContent />
       ) : (

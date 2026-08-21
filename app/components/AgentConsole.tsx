@@ -138,9 +138,11 @@ export default function AgentConsole() {
   return (
     <div className="space-y-8">
       <section className="rounded-2xl border border-edge bg-surface p-6">
-        <p className="text-xs font-semibold uppercase tracking-widest text-muted">
-          SPOTTER — settlement agent
-        </p>
+        <div className="flex flex-col gap-6 sm:flex-row sm:items-start sm:justify-between">
+          <div className="min-w-0 flex-1">
+            <p className="text-xs font-semibold uppercase tracking-widest text-muted">
+              SPOTTER — settlement agent
+            </p>
         {wallet.isPending ? (
           <Skeleton className="mt-4 h-10 w-3/4" />
         ) : wallet.data?.address !== undefined ? (
@@ -189,6 +191,21 @@ export default function AgentConsole() {
             run the provisioning script.
           </p>
         )}
+          </div>
+          <div className="shrink-0 self-center sm:self-start">
+            <div className="otter-float w-36 overflow-hidden rounded-2xl border border-edge bg-surface-raised sm:w-44">
+              {/* eslint-disable-next-line @next/next/no-img-element */}
+              <img
+                src="/spotter/spotter-watching.png"
+                alt="SPOTTER, the otter, watching the ledger"
+                className="aspect-square w-full object-cover"
+              />
+            </div>
+            <p className="mt-2 text-center text-xs uppercase tracking-wide text-muted">
+              on the clock
+            </p>
+          </div>
+        </div>
       </section>
 
       <section className="space-y-3">
