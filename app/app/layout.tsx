@@ -57,6 +57,20 @@ export default function RootLayout({
               </Link>
             </nav>
           </footer>
+          {/* SPOTTER occasionally sprints across the bottom of the screen.
+              Decoration only: pointer-events-none, aria-hidden, and stopped
+              entirely under prefers-reduced-motion. */}
+          <div
+            aria-hidden="true"
+            className="otter-dash pointer-events-none fixed bottom-2 left-0 z-30 select-none"
+          >
+            {/* eslint-disable-next-line @next/next/no-img-element */}
+            <img
+              src="/spotter/spotter-run.png"
+              alt=""
+              className="h-16 w-auto drop-shadow-lg sm:h-20"
+            />
+          </div>
           <HelperWidget />
         </Providers>
       </body>

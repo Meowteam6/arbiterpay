@@ -1,24 +1,34 @@
 @import "tailwindcss";
 
+/* Warm-light theme. Cream canvas, emerald trust, coral human warmth, gold for
+   money in motion. Replaces the original dark green-black. Semantics are held
+   constant so components read the same roles - only the values flip. */
 :root {
-  --background: #0b100d;
-  --surface: #121a15;
-  --surface-raised: #18231c;
-  --border: #24332a;
-  --foreground: #e8f1ea;
-  --muted: #aabdb4;
-  --accent: #34d399;
-  --accent-strong: #10b981;
-  --accent-deep: #064e3b;
-  --danger: #f87171;
-  --warning: #fbbf24;
-  /* Warm accent, reserved STRICTLY for money in motion: a payout landing or
-     the agent's live spend. Never used for a static balance or a verdict -
-     emerald owns trust, gold owns movement. Kept clear of the yellow warning
-     tone so a payout never reads as an alert. */
+  color-scheme: light;
+  --background: #faf6ee;       /* warm cream canvas */
+  --surface: #ffffff;          /* cards sit above the cream */
+  --surface-raised: #fffdf8;   /* alt sections / raised surfaces */
+  --border: #ece3d2;           /* warm hairline border */
+  --foreground: #16211b;       /* warm near-black text */
+  --muted: #5f6f64;            /* muted secondary text */
+  --accent: #10b981;           /* primary emerald - trust, buttons, marks */
+  --accent-strong: #059669;    /* deeper emerald - hover, emphasis text */
+  --accent-deep: #064e3b;      /* deep emerald - dark accents on light */
+  /* Warm human accent, for celebratory/human touches only (badges, avatar
+     rings). Never on a number, never a verdict - coral is people, not money. */
+  --coral: #ff8a5c;
+  --coral-strong: #f06d3a;
+  --danger: #ef4444;
+  /* Caution / self-reported tone. A muted amber, deliberately NOT gold: a
+     self-reported (unverified) claim must never borrow the money color, and a
+     payout must never read as an alert. */
+  --warning: #b45309;
+  /* Gold, reserved STRICTLY for money in motion: a payout landing or the
+     agent's live spend. Never a static balance, never a verdict, never a
+     generic highlight - emerald owns trust, gold owns movement. */
   --gold: #f3b13c;
   --gold-strong: #eaa11f;
-  --gold-deep: #3a2a09;
+  --gold-deep: #a9760c;        /* rich legible gold: money text on cream, and a soft gold tint at low opacity */
 }
 
 @theme inline {
@@ -41,7 +51,22 @@
 }
 
 body {
-  background: var(--background);
+  /* Warm cream base with a whisper of nature: a soft emerald light from the top
+     and a faint warm ground tone lower right, kept low-opacity and fixed so the
+     atmosphere reads as outdoors without ever fighting the text on top. */
+  background:
+    /* sky-light overhead */
+    radial-gradient(1200px 520px at 50% -10%, rgba(16, 185, 129, 0.09), transparent 70%),
+    /* warm morning sun, upper right */
+    radial-gradient(900px 520px at 90% 6%, rgba(255, 138, 92, 0.06), transparent 70%),
+    /* scenic foliage tone bleeding in from the left gutter */
+    linear-gradient(to right, rgba(16, 185, 129, 0.11), transparent 20%),
+    /* and the right gutter */
+    linear-gradient(to left, rgba(16, 185, 129, 0.1), transparent 20%),
+    /* soft earthy ground rising from the bottom */
+    linear-gradient(to top, rgba(122, 85, 17, 0.05), transparent 24%),
+    var(--background);
+  background-attachment: fixed;
   color: var(--foreground);
   font-family: var(--font-geist-sans), system-ui, sans-serif;
 }
@@ -100,10 +125,57 @@ body {
   animation: ghm-rise-in 260ms ease-out both;
 }
 
+/* Mr Otter idles with a slow, gentle float - alive, never distracting. */
+@keyframes otter-float {
+  0%,
+  100% {
+    transform: translateY(0);
+  }
+  50% {
+    transform: translateY(-8px);
+  }
+}
+
+.otter-float {
+  animation: otter-float 4.5s ease-in-out infinite;
+}
+
+/* The run-across-the-screen Easter egg: SPOTTER dashes left to right along the
+   very bottom, then gets out of the way. Fires occasionally, not constantly. */
+@keyframes otter-dash {
+  0%,
+  80% {
+    transform: translateX(-24vw) translateY(0);
+    opacity: 0;
+  }
+  82% {
+    opacity: 1;
+  }
+  88% {
+    transform: translateX(40vw) translateY(-12px);
+  }
+  90% {
+    transform: translateX(48vw) translateY(0);
+  }
+  98% {
+    opacity: 1;
+  }
+  100% {
+    transform: translateX(124vw) translateY(0);
+    opacity: 0;
+  }
+}
+
+.otter-dash {
+  animation: otter-dash 24s ease-in-out infinite;
+}
+
 @media (prefers-reduced-motion: reduce) {
   .animate-stamp-in,
   .animate-rise-in,
-  .ghm-rise-in {
+  .ghm-rise-in,
+  .otter-float,
+  .otter-dash {
     animation: none;
   }
 }

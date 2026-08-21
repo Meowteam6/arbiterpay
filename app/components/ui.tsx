@@ -110,7 +110,7 @@ export function Badge({
   tone?: "accent" | "muted" | "warning";
 }) {
   const tones: Record<string, string> = {
-    accent: "bg-accent-deep text-accent border-accent/30",
+    accent: "bg-accent/12 text-accent-strong border-accent/30",
     muted: "bg-surface-raised text-muted border-edge",
     warning: "bg-warning/10 text-warning border-warning/30",
   };
@@ -173,7 +173,7 @@ export function Money({
   };
   const tones: Record<string, string> = {
     default: "text-foreground",
-    gold: "text-gold",
+    gold: "text-gold-deep",
   };
   return (
     <span
@@ -220,11 +220,11 @@ export function Verdict({
       <span
         className={`inline-flex items-center rounded-full border px-3 py-1 text-xs font-semibold uppercase tracking-wide ${
           verified
-            ? "border-accent/30 bg-accent-deep text-accent"
+            ? "border-accent/30 bg-accent/12 text-accent-strong"
             : "border-danger/40 bg-danger/10 text-danger"
         }`}
       >
-        {verified ? "Verified" : "Not verified"}
+        {verified ? "✓ Verified" : "Not verified"}
       </span>
       {confidence !== undefined ? (
         <span className="text-xs uppercase tracking-wide text-muted">
@@ -247,7 +247,7 @@ export function Stamp({
   const tones: Record<string, string> = {
     accent: "border-accent text-accent",
     danger: "border-danger text-danger",
-    gold: "border-gold text-gold",
+    gold: "border-gold text-gold-deep",
   };
   return (
     <span
