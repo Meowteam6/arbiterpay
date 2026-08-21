@@ -144,6 +144,49 @@ export default function Home() {
           </div>
         ))}
       </section>
+
+      <section className="rounded-3xl border border-edge bg-surface-raised p-8 sm:p-10">
+        <p className="text-xs font-semibold uppercase tracking-widest text-accent-strong">
+          Why it has to be crypto
+        </p>
+        <h2 className="mt-3 max-w-2xl text-2xl font-bold leading-tight tracking-tight sm:text-3xl">
+          You can&apos;t Venmo your grandma in another country to go for a walk.
+          You can pay her in USDC the second she does.
+        </h2>
+        <p className="mt-4 max-w-2xl leading-relaxed text-muted">
+          Crypto is the only rail that lets someone in one country reward someone
+          in another — instantly, for a real thing they did. No bank, no borders,
+          no week-long wire. Dare a friend, back a parent&apos;s goal, and the
+          money lands the moment they hit it.
+        </p>
+        <div className="mt-8 grid gap-5 sm:grid-cols-3">
+          <div>
+            <p className="text-sm font-semibold">Here now</p>
+            <p className="mt-1 text-sm leading-relaxed text-muted">
+              Dare one friend, fund their goal, they get paid in USDC when they
+              hit it. Verified in a sealed enclave — nobody sees the health data.
+            </p>
+          </div>
+          <div>
+            <p className="text-sm font-semibold">A reward, not a bet</p>
+            <p className="mt-1 text-sm leading-relaxed text-muted">
+              A sponsor — or you — puts the money up. You show up for yourself and
+              collect. Nobody wagers anything against anybody.
+            </p>
+          </div>
+          <div>
+            <p className="text-sm font-semibold">Where it&apos;s going</p>
+            <p className="mt-1 text-sm leading-relaxed text-muted">
+              Whole families and communities, across borders and languages,
+              competing to show up for each other. The licensed road ahead.
+            </p>
+          </div>
+        </div>
+        <p className="mt-8 text-xs leading-relaxed text-muted">
+          Today it runs on Arc testnet with play-money USDC while we build. Real
+          cross-border payouts are the road ahead, not a claim that they are live.
+        </p>
+      </section>
     </div>
   );
 }
