@@ -11,7 +11,7 @@
 // but NEVER reads as "verified": amber ribbon, no check/shield, no enclave
 // claim. Dismissing the takeover reveals the compact receipt left behind.
 
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import { ArcTxLink, Money, Stamp } from "@/components/ui";
 import Confetti from "@/components/Confetti";
 
@@ -29,6 +29,17 @@ export default function PayoutMoment({
   initialOpen?: boolean;
 }) {
   const [open, setOpen] = useState(initialOpen);
+  // Respect reduced-motion: only the celebration VIDEO carries motion, so it
+  // falls back to the static riverbank scene. Starts static (SSR-safe) and
+  // upgrades to video on mount when motion is allowed.
+  const [motionOK, setMotionOK] = useState(false);
+  useEffect(() => {
+    const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
+    const sync = () => setMotionOK(!mq.matches);
+    sync();
+    mq.addEventListener("change", sync);
+    return () => mq.removeEventListener("change", sync);
+  }, []);
 
   const tierChip = selfReported ? (
     <span className="inline-flex items-center rounded-full border border-warning/40 bg-warning/10 px-2.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide text-warning">
@@ -89,25 +100,41 @@ export default function PayoutMoment({
           className="absolute inset-0 cursor-default bg-foreground/40 backdrop-blur-sm"
         />
         <div className="animate-payout-pop relative z-10 w-full max-w-md overflow-hidden rounded-3xl border border-edge bg-surface shadow-2xl">
-          {/* the scene: SPOTTER holds up your coin on the riverbank */}
-          <div className="relative h-48 overflow-hidden">
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src="/spotter/backdrop.png"
-              alt=""
-              aria-hidden="true"
-              className="absolute inset-0 h-full w-full object-cover object-bottom"
-            />
+          {/* the scene: SPOTTER holds up your coin on the riverbank. Motion on =
+              the celebration video; reduced-motion = the still + confetti. */}
+          <div className="relative aspect-video overflow-hidden bg-surface-raised">
+            {motionOK ? (
+              <video
+                className="absolute inset-0 h-full w-full object-cover"
+                src="/spotter/spotter-thedrop.mp4"
+                poster="/spotter/spotter-payday.png"
+                autoPlay
+                muted
+                loop
+                playsInline
+                aria-hidden="true"
+              />
+            ) : (
+              <>
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src="/spotter/backdrop.png"
+                  alt=""
+                  aria-hidden="true"
+                  className="absolute inset-0 h-full w-full object-cover object-bottom"
+                />
+                <Confetti />
+                {/* eslint-disable-next-line @next/next/no-img-element */}
+                <img
+                  src="/spotter/spotter-payday.png"
+                  alt="SPOTTER the otter holding up a gold coin"
+                  className="otter-float absolute bottom-0 left-1/2 h-40 w-auto -translate-x-1/2 drop-shadow-xl"
+                />
+              </>
+            )}
             <div
               aria-hidden="true"
-              className="absolute inset-0 bg-gradient-to-t from-surface via-surface/10 to-transparent"
-            />
-            <Confetti />
-            {/* eslint-disable-next-line @next/next/no-img-element */}
-            <img
-              src="/spotter/spotter-payday.png"
-              alt="SPOTTER the otter holding up a gold coin"
-              className="otter-float absolute bottom-0 left-1/2 h-44 w-auto -translate-x-1/2 drop-shadow-xl"
+              className="pointer-events-none absolute inset-x-0 bottom-0 h-16 bg-gradient-to-t from-surface to-transparent"
             />
           </div>
 

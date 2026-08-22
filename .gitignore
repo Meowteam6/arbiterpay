@@ -42,3 +42,7 @@ app/test-results/
 app/blob-report/
 app/.playwright/
 app/e2e-artifacts/
+
+# Higgsfield CLI skills (installed locally, third-party, not shipped)
+.agents/
+skills-lock.json

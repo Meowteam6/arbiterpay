@@ -10,6 +10,16 @@ import {
   type PoolInfo,
 } from "@/lib/contract";
 import { type PoolPhase } from "@/lib/pool-lifecycle";
+import { otterPoseForGoal } from "@/lib/spotter-goal";
+
+// Soft per-action wash behind the otter so it reads at a glance against the card.
+const OTTER_TINT: Record<string, string> = {
+  flushot: "#fdeadf",
+  screening: "#e2f4fd",
+  dental: "#e4f6ee",
+  checkup: "#e4f6ee",
+  greet: "#f4efe3",
+};
 
 // phase is passed by the pool list so one clock snapshot orders and labels
 // every card consistently - the card never reads the clock itself.
@@ -22,21 +32,38 @@ export default function PoolCard({
 }) {
   const policy = proofPolicyOf(pool.goalSpec);
   const isPreventiveCare = policy.floor === "document";
+  // The card's icon slot IS SPOTTER doing the goal's action. Decorative, so the
+  // otter is aria-hidden - the goal title already conveys the meaning.
+  const pose = otterPoseForGoal(pool.initiative, pool.goalSpec);
   return (
     <Link
       href={`/pools/${pool.id.toString()}`}
       className="block rounded-2xl border border-edge bg-surface p-5 transition-colors hover:border-accent/50"
     >
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <div className="flex flex-wrap items-center gap-2">
-          <Badge>{pool.initiative}</Badge>
-          <ProofTierBadges policy={policy} />
+      <div className="flex items-start gap-3">
+        <div
+          className="shrink-0 overflow-hidden rounded-2xl border border-edge p-1.5"
+          style={{ backgroundColor: OTTER_TINT[pose] ?? "var(--surface-raised)" }}
+        >
+          {/* eslint-disable-next-line @next/next/no-img-element */}
+          <img
+            src={`/spotter/spotter-${pose}.png`}
+            alt=""
+            aria-hidden="true"
+            className="otter-float h-24 w-24 object-contain"
+          />
         </div>
-        {phase === "settled" ? (
-          <Badge tone="muted">Settled</Badge>
-        ) : phase === "expired" ? (
-          <Badge tone="warning">Expired</Badge>
-        ) : null}
+        <div className="flex flex-1 flex-wrap items-center justify-between gap-2">
+          <div className="flex flex-wrap items-center gap-2">
+            <Badge>{pool.initiative}</Badge>
+            <ProofTierBadges policy={policy} />
+          </div>
+          {phase === "settled" ? (
+            <Badge tone="muted">Settled</Badge>
+          ) : phase === "expired" ? (
+            <Badge tone="warning">Expired</Badge>
+          ) : null}
+        </div>
       </div>
       {isPreventiveCare ? (
         <p className="mt-3 text-xs font-semibold uppercase tracking-wide text-accent">
